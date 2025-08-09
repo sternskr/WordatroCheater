@@ -34,7 +34,8 @@ def demo():
             print("🏆 Top scoring words:")
             for i, (word, score) in enumerate(results['top_words'][:3], 1):
                 letter_sum = sum(cheater.letter_scores.get(letter, 10) for letter in word)
-                print(f"  {i}. {word:<12} | Score: {score:4d} | ({letter_sum} × {len(word)})")
+                # Compact format for terminals
+                print(f"  {i}. {word:<10} | {score:3d}pts | ({letter_sum}×{len(word)})")
         else:
             print("❌ No valid words found")
         
@@ -42,7 +43,25 @@ def demo():
         if results['exchange_suggestions']:
             print("💡 Best exchange suggestion:")
             suggestion = results['exchange_suggestions'][0]
-            print(f"  {suggestion[0]}")
+            # Split long lines for readability
+            suggestion_lines = suggestion[0].split('\n')
+            for line in suggestion_lines:
+                if len(line) > 70:
+                    # Try to break at commas for readability
+                    if ', ' in line:
+                        parts = line.split(', ')
+                        current_line = parts[0]
+                        for part in parts[1:]:
+                            if len(current_line + ', ' + part) > 70:
+                                print(f"  {current_line},")
+                                current_line = f"    {part}"
+                            else:
+                                current_line += f", {part}"
+                        print(f"  {current_line}")
+                    else:
+                        print(f"  {line}")
+                else:
+                    print(f"  {line}")
             print(f"  Improvement: +{suggestion[1]} points")
     
     print(f"\n🎉 Demo complete!")

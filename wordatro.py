@@ -493,38 +493,43 @@ class WordatroCheater:
             
             # Test impact of removing letters, starting with excess ones
             if truly_excess > 0:
-                # Test removing one excess letter (should have minimal impact)
-                test_letters = input_letters.copy()
-                test_letters.remove(letter)  # Remove one instance
+                # Test removing different numbers of this letter to find the safe removal count
+                removal_impacts = {}
                 
-                remaining_words = self.generate_word_combinations(test_letters)
-                remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
-                
-                words_lost = total_words - len(remaining_words)
-                score_lost = total_score_potential - remaining_score_potential
-                
-                # For excess letters, the impact should be minimal since they weren't needed
-                impact_per_excess_removal = score_lost
-                
-                # If we have more truly excess letters, removing them should have almost no impact
-                if truly_excess > 1:
-                    # Test removing multiple excess letters to verify
-                    test_letters_multi = input_letters.copy()
-                    letters_to_remove = min(truly_excess, available_count - 1)  # Don't remove all
-                    for _ in range(letters_to_remove):
-                        if letter in test_letters_multi:
-                            test_letters_multi.remove(letter)
+                for num_to_remove in range(1, min(truly_excess + 2, available_count + 1)):  # Test removing 1 to all excess + 1 more
+                    test_letters = input_letters.copy()
                     
-                    remaining_words_multi = self.generate_word_combinations(test_letters_multi)
-                    remaining_score_multi = sum(self.calculate_word_score(word) for word in remaining_words_multi) if remaining_words_multi else 0
+                    # Remove the specified number of instances
+                    removed_count = 0
+                    for _ in range(num_to_remove):
+                        if letter in test_letters:
+                            test_letters.remove(letter)
+                            removed_count += 1
+                        else:
+                            break
                     
-                    # This should show minimal additional loss
-                    additional_loss = remaining_score_potential - remaining_score_multi
-                    avg_impact_per_excess = (score_lost + additional_loss) / letters_to_remove if letters_to_remove > 0 else 0
+                    if removed_count > 0:
+                        remaining_words = self.generate_word_combinations(test_letters)
+                        remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
+                        
+                        words_lost = total_words - len(remaining_words)
+                        score_lost = total_score_potential - remaining_score_potential
+                        
+                        removal_impacts[removed_count] = {
+                            'words_lost': words_lost,
+                            'score_lost': score_lost,
+                            'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0
+                        }
+                
+                # Use the impact of removing 1 letter for the main removability score
+                if 1 in removal_impacts:
+                    words_lost = removal_impacts[1]['words_lost']
+                    score_lost = removal_impacts[1]['score_lost']
+                    removability_score = score_lost
                 else:
-                    avg_impact_per_excess = impact_per_excess_removal
-                
-                removability_score = avg_impact_per_excess
+                    words_lost = 0
+                    score_lost = 0
+                    removability_score = 0
                 
             else:
                 # No excess letters - removing any will be destructive
@@ -539,6 +544,7 @@ class WordatroCheater:
                 
                 # All letters of this type are needed, so impact is high
                 removability_score = score_lost
+                removal_impacts = {}  # No removal impacts to show since no excess
             
             # Build the analysis record
             letter_analysis[letter] = {
@@ -550,7 +556,8 @@ class WordatroCheater:
                 'excess_letters': truly_excess,
                 'removability_score': removability_score,
                 'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0,
-                'is_excess_available': truly_excess > 0
+                'is_excess_available': truly_excess > 0,
+                'removal_impacts': removal_impacts if truly_excess > 0 else {}
             }
         
         return letter_analysis
@@ -582,13 +589,34 @@ class WordatroCheater:
                     description = f"  {i}. {letter} - unused in any words (safe to exchange)"
                 else:
                     # Build description with impact and duplicate info
-                    impact_desc = f"removing loses {analysis['destruction_percentage']:.1f}% of score potential"
-                    
-                    if analysis['excess_letters'] > 0:
-                        duplicate_info = f"has {analysis['excess_letters']} excess duplicate{'s' if analysis['excess_letters'] > 1 else ''}, "
-                        description = f"  {i}. {letter} - {duplicate_info}{impact_desc}"
+                    if analysis['excess_letters'] > 0 and analysis['removal_impacts']:
+                        # Show impact of removing different numbers of excess letters
+                        duplicate_info = f"has {analysis['excess_letters']} excess duplicate{'s' if analysis['excess_letters'] > 1 else ''}"
+                        
+                        # Build removal impact summary with line wrapping
+                        impact_details = []
+                        for remove_count in sorted(analysis['removal_impacts'].keys()):
+                            impact = analysis['removal_impacts'][remove_count]
+                            if remove_count <= analysis['excess_letters']:
+                                # This is removing excess letters
+                                safety = "safe" if impact['destruction_percentage'] < 5 else "caution"
+                                impact_details.append(f"rm{remove_count}:{impact['destruction_percentage']:.1f}%({safety})")
+                            else:
+                                # This is removing needed letters
+                                impact_details.append(f"rm{remove_count}:{impact['destruction_percentage']:.1f}%(risky)")
+                        
+                        # Split impact details across lines if too long
+                        base_line = f"  {i}. {letter} - {duplicate_info}"
+                        impact_summary = ", ".join(impact_details)
+                        
+                        if len(base_line + ", " + impact_summary) > 80:
+                            # Split to multiple lines
+                            description = base_line + "\n      " + impact_summary
+                        else:
+                            description = base_line + ", " + impact_summary
                     else:
-                        words_lost = analysis['words_lost_if_removed']
+                        # No excess letters - show standard impact
+                        impact_desc = f"removing loses {analysis['destruction_percentage']:.1f}% of score potential"
                         word_info = f"used in {analysis['words_using_letter']} words, "
                         description = f"  {i}. {letter} - {word_info}{impact_desc}"
                         
@@ -685,24 +713,28 @@ class WordatroCheater:
     
     def print_results(self, results: Dict):
         """Print formatted results."""
-        print(f"\n{'='*60}")
-        print(f"WORDATRO CHEATER RESULTS")
-        print(f"{'='*60}")
+        # Calculate terminal width-friendly formatting
+        terminal_width = 80  # Default conservative width
+        header_width = min(terminal_width, 60)
+        
+        print(f"\n{'='*header_width}")
+        print(f"WORDATRO CHEATER RESULTS".center(header_width))
+        print(f"{'='*header_width}")
         print(f"Input: {results['input']}")
         print(f"Letters: {' '.join(results['parsed_letters'])}")
-        print(f"Exchanges remaining: {results['exchanges_remaining']}")
-        print(f"Total valid words found: {results['total_words_found']}")
+        print(f"Exchanges: {results['exchanges_remaining']} | Words found: {results['total_words_found']}")
         
-        print(f"\n{'='*30} TOP 10 WORDS {'='*30}")
+        print(f"\n{'='*20} TOP 10 WORDS {'='*20}")
         if results['top_words']:
             for i, (word, score) in enumerate(results['top_words'], 1):
                 letter_score = sum(self.letter_scores.get(letter, 10) for letter in word)
-                print(f"{i:2d}. {word:<12} | Score: {score:4d} | ({letter_score} × {len(word)})")
+                # Compact format for smaller terminals
+                print(f"{i:2d}. {word:<10} | {score:3d}pts | ({letter_score}×{len(word)})")
         else:
             print("No valid words found.")
         
         if results.get('exchange_suggestions'):
-            print(f"\n{'='*25} LETTER ANALYSIS {'='*25}")
+            print(f"\n{'='*15} LETTER ANALYSIS {'='*15}")
             for i, (suggestion, improvement, new_letters) in enumerate(results['exchange_suggestions'], 1):
                 print(f"{suggestion}")
                 print()
