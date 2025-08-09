@@ -464,94 +464,134 @@ class WordatroCheater:
         return suggestions
     
     def _analyze_letter_usage_in_words(self, input_letters: List[str], found_words: Set[str]) -> Dict:
-        """Analyze how frequently each input letter appears in the found words."""
+        """Analyze how destructive removing each letter would be to scoring potential."""
         input_letter_counts = Counter(input_letters)
         
-        # Count how many words each input letter appears in
-        letter_word_appearances = defaultdict(int)  # How many words contain each letter
-        letter_total_usage = defaultdict(int)  # Total times each letter is used across all words
-        letter_contribution_scores = defaultdict(float)  # Average score contribution
+        # Calculate the destructive impact of removing each letter
+        letter_analysis = {}
         
-        for word in found_words:
-            word_letters = Counter(word.upper())
-            word_score = self.calculate_word_score(word)
-            
-            for letter in input_letter_counts:
-                if letter == '*':  # Skip wildcards
-                    continue
-                    
-                if letter in word_letters:
-                    # Count word appearances (each word counts once, regardless of letter frequency in that word)
-                    letter_word_appearances[letter] += 1
-                    
-                    # Count total usage across all words
-                    letter_total_usage[letter] += word_letters[letter]
-                    
-                    # Calculate contribution to word score
-                    letter_score = self.letter_scores.get(letter, 10)
-                    contribution = (letter_score * len(word)) / word_score if word_score > 0 else 0
-                    letter_contribution_scores[letter] += contribution
+        # Get baseline stats
+        total_words = len(found_words)
+        if total_words == 0:
+            return {}
         
-        # Calculate usage efficiency for each letter
-        letter_efficiency = {}
+        total_score_potential = sum(self.calculate_word_score(word) for word in found_words)
+        
         for letter in input_letter_counts:
-            if letter == '*':
+            if letter == '*':  # Skip wildcards
                 continue
-                
+            
             available_count = input_letter_counts[letter]
-            word_appearances = letter_word_appearances[letter]
-            total_usage = letter_total_usage[letter]
-            avg_contribution = letter_contribution_scores[letter] / max(1, word_appearances)
             
-            # Calculate usage rate: what percentage of your available letters are actually being used
-            # This is total_usage divided by available_count (how many times you could use this letter)
-            max_possible_usage = available_count * len(found_words)  # If every word used every available letter
-            actual_usage_rate = total_usage / max_possible_usage if max_possible_usage > 0 else 0
+            # Calculate duplicate analysis first
+            words_using_letter = sum(1 for word in found_words if letter in word.upper())
+            max_usage_in_word = max((Counter(word.upper())[letter] for word in found_words if letter in word.upper()), default=0)
             
-            # Efficiency = (word appearances * actual usage rate * avg contribution)
-            efficiency = word_appearances * actual_usage_rate * avg_contribution
+            # Determine how many of this letter are actually excess
+            # If we have 3 A's but no word uses more than 1 A, then 2 A's are excess
+            truly_excess = max(0, available_count - max_usage_in_word)
+            
+            # Test impact of removing letters, starting with excess ones
+            if truly_excess > 0:
+                # Test removing one excess letter (should have minimal impact)
+                test_letters = input_letters.copy()
+                test_letters.remove(letter)  # Remove one instance
                 
-            letter_efficiency[letter] = {
-                'efficiency': efficiency,
-                'total_usage': total_usage,
+                remaining_words = self.generate_word_combinations(test_letters)
+                remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
+                
+                words_lost = total_words - len(remaining_words)
+                score_lost = total_score_potential - remaining_score_potential
+                
+                # For excess letters, the impact should be minimal since they weren't needed
+                impact_per_excess_removal = score_lost
+                
+                # If we have more truly excess letters, removing them should have almost no impact
+                if truly_excess > 1:
+                    # Test removing multiple excess letters to verify
+                    test_letters_multi = input_letters.copy()
+                    letters_to_remove = min(truly_excess, available_count - 1)  # Don't remove all
+                    for _ in range(letters_to_remove):
+                        if letter in test_letters_multi:
+                            test_letters_multi.remove(letter)
+                    
+                    remaining_words_multi = self.generate_word_combinations(test_letters_multi)
+                    remaining_score_multi = sum(self.calculate_word_score(word) for word in remaining_words_multi) if remaining_words_multi else 0
+                    
+                    # This should show minimal additional loss
+                    additional_loss = remaining_score_potential - remaining_score_multi
+                    avg_impact_per_excess = (score_lost + additional_loss) / letters_to_remove if letters_to_remove > 0 else 0
+                else:
+                    avg_impact_per_excess = impact_per_excess_removal
+                
+                removability_score = avg_impact_per_excess
+                
+            else:
+                # No excess letters - removing any will be destructive
+                test_letters = input_letters.copy()
+                test_letters.remove(letter)
+                
+                remaining_words = self.generate_word_combinations(test_letters)
+                remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
+                
+                words_lost = total_words - len(remaining_words)
+                score_lost = total_score_potential - remaining_score_potential
+                
+                # All letters of this type are needed, so impact is high
+                removability_score = score_lost
+            
+            # Build the analysis record
+            letter_analysis[letter] = {
                 'available_count': available_count,
-                'word_appearances': word_appearances,
-                'avg_contribution': avg_contribution,
-                'usage_rate': actual_usage_rate
+                'words_using_letter': words_using_letter,
+                'words_lost_if_removed': words_lost,
+                'score_lost_if_removed': score_lost,
+                'max_usage_in_word': max_usage_in_word,
+                'excess_letters': truly_excess,
+                'removability_score': removability_score,
+                'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0,
+                'is_excess_available': truly_excess > 0
             }
         
-        return letter_efficiency
+        return letter_analysis
     
     def _format_least_useful_letters(self, letter_analysis: Dict, exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
         """Format the least useful letters analysis for display."""
         
-        # Sort letters by usefulness (least useful first - best candidates for swapping)
-        letters_by_usefulness = []
+        # Sort letters by removability (least destructive to remove first - best candidates for swapping)
+        letters_by_removability = []
         for letter, analysis in letter_analysis.items():
             if letter != '*' and analysis['available_count'] > 0:
-                # Create a usefulness score based on word appearances and usage rate
-                usefulness_score = analysis['word_appearances'] * analysis['usage_rate']
-                letters_by_usefulness.append((letter, usefulness_score, analysis))
+                # Lower removability_score = less destructive to remove = better candidate for exchange
+                letters_by_removability.append((letter, analysis['removability_score'], analysis))
         
-        letters_by_usefulness.sort(key=lambda x: x[1])  # Sort by usefulness (lowest first)
+        letters_by_removability.sort(key=lambda x: x[1])  # Sort by removability (lowest destructive impact first)
         
-        if not letters_by_usefulness:
+        if not letters_by_removability:
             return []
         
         # Format the results
         suggestions = []
         
-        # Create a single suggestion showing least useful letters ranked
-        if letters_by_usefulness:
-            suggestion_lines = ["Least useful letters to consider exchanging (ranked worst to best):"]
+        # Create a single suggestion showing least destructive letters to remove
+        if letters_by_removability:
+            suggestion_lines = ["Letters ranked by exchange priority (least destructive impact first):"]
             
-            for i, (letter, usefulness, analysis) in enumerate(letters_by_usefulness, 1):
-                if analysis['word_appearances'] == 0:
-                    description = f"  {i}. {letter} - unused in any words"
-                elif analysis['word_appearances'] == 1:
-                    description = f"  {i}. {letter} - appears in 1 word ({analysis['usage_rate']:.0%} of available used)"
+            for i, (letter, removability_score, analysis) in enumerate(letters_by_removability, 1):
+                if analysis['words_using_letter'] == 0:
+                    description = f"  {i}. {letter} - unused in any words (safe to exchange)"
                 else:
-                    description = f"  {i}. {letter} - appears in {analysis['word_appearances']} words ({analysis['usage_rate']:.0%} of available used)"
+                    # Build description with impact and duplicate info
+                    impact_desc = f"removing loses {analysis['destruction_percentage']:.1f}% of score potential"
+                    
+                    if analysis['excess_letters'] > 0:
+                        duplicate_info = f"has {analysis['excess_letters']} excess duplicate{'s' if analysis['excess_letters'] > 1 else ''}, "
+                        description = f"  {i}. {letter} - {duplicate_info}{impact_desc}"
+                    else:
+                        words_lost = analysis['words_lost_if_removed']
+                        word_info = f"used in {analysis['words_using_letter']} words, "
+                        description = f"  {i}. {letter} - {word_info}{impact_desc}"
+                        
                 suggestion_lines.append(description)
             
             suggestion_text = "\n".join(suggestion_lines)
