@@ -584,7 +584,7 @@ class WordatroCheater:
     
 
     
-    def find_exchange_opportunities(self, letters: List[str], exchanges_remaining: int, required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None) -> List[Tuple[str, int, List[str]]]:
+    def find_exchange_opportunities(self, letters: List[str], exchanges_remaining: int, required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None, existing_words: Set[str] = None) -> List[Tuple[str, int, List[str]]]:
         """Analyze least useful letters based on their usage in found words."""
         if exchanges_remaining <= 0:
             return []
@@ -596,17 +596,22 @@ class WordatroCheater:
         
         current_letters = letters.copy()
         
-        # Get current words with progress indication
-        print("🔍 Generating word combinations...")
-        current_words = self.generate_word_combinations(current_letters, target_length=target_length,
-                                                      required_letters=required_letters, 
-                                                      positional_letters=positional_letters)
-        
-        if not current_words:
-            return []
-        
-        print(f"✓ Found {len(current_words)} words")
-        print("🧮 Analyzing exchange potential...")
+        # Use existing words if provided, otherwise generate them
+        if existing_words is not None:
+            current_words = existing_words
+            print(f"🧮 Analyzing exchange potential using {len(current_words)} existing words...")
+        else:
+            # Get current words with progress indication
+            print("🔍 Generating word combinations...")
+            current_words = self.generate_word_combinations(current_letters, target_length=target_length,
+                                                          required_letters=required_letters, 
+                                                          positional_letters=positional_letters)
+            
+            if not current_words:
+                return []
+            
+            print(f"✓ Found {len(current_words)} words")
+            print("🧮 Analyzing exchange potential...")
         
         # Analyze letter usage in found words to identify least useful letters
         letter_usage_analysis = self._analyze_letter_usage_in_words(current_letters, current_words, required_letters, target_length, positional_letters)
@@ -1227,8 +1232,8 @@ class WordatroCheater:
             scored_words.sort(key=lambda x: x[1], reverse=True)
             top_10 = scored_words[:10]
             
-            # Get exchange suggestions (silent)
-            exchange_suggestions = self._find_exchange_opportunities_silent(letters, exchanges_remaining, required_letters, target_length, positional_letters)
+            # Get exchange suggestions (silent) using the words we already found
+            exchange_suggestions = self._find_exchange_opportunities_silent(letters, exchanges_remaining, required_letters, target_length, positional_letters, existing_words=valid_words)
             
             return {
                 'input': input_str,
@@ -1244,7 +1249,7 @@ class WordatroCheater:
         except Exception:
             return {}
     
-    def _find_exchange_opportunities_silent(self, letters: List[str], exchanges_remaining: int, required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None) -> List:
+    def _find_exchange_opportunities_silent(self, letters: List[str], exchanges_remaining: int, required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None, existing_words: Set[str] = None) -> List:
         """Silent version of find_exchange_opportunities for cache priming."""
         try:
             if exchanges_remaining <= 0:
@@ -1257,13 +1262,17 @@ class WordatroCheater:
             
             current_letters = letters.copy()
             
-            # Get current words (silent)
-            current_words = self.generate_word_combinations(current_letters, target_length=target_length,
-                                                          required_letters=required_letters, 
-                                                          positional_letters=positional_letters)
-            
-            if not current_words:
-                return []
+            # Use existing words if provided, otherwise generate them
+            if existing_words is not None:
+                current_words = existing_words
+            else:
+                # Get current words (silent)
+                current_words = self.generate_word_combinations(current_letters, target_length=target_length,
+                                                              required_letters=required_letters, 
+                                                              positional_letters=positional_letters)
+                
+                if not current_words:
+                    return []
             
             # Analyze letter usage (silent)
             letter_usage_analysis = self._analyze_letter_usage_in_words_silent(current_letters, current_words, required_letters, target_length, positional_letters)
@@ -1398,8 +1407,8 @@ class WordatroCheater:
         top_10 = scored_words[:10]
         
         print("⚡ Analyzing exchange opportunities...")
-        # Get exchange suggestions
-        exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining, required_letters, target_length, positional_letters)
+        # Get exchange suggestions using the words we already found
+        exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining, required_letters, target_length, positional_letters, existing_words=valid_words)
         print("✓ Analysis complete!")
         
         return {
