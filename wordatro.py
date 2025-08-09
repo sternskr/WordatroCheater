@@ -302,23 +302,123 @@ class WordatroCheater:
         letter_sum = sum(self.letter_scores.get(letter.upper(), 10) for letter in word)
         return letter_sum * len(word)
     
-    def parse_input(self, input_str: str) -> Tuple[List[str], int]:
-        """Parse input string to extract letters and number of exchanges."""
-        # Extract number at the end
+    def parse_input(self, input_str: str) -> Tuple[List[str], int, List[str], int, Dict[int, str]]:
+        """Parse input string to extract letters, exchanges, required letters, target length, and positional letters.
+        
+        Format: [length]letters[exchanges]
+        - Number at start = target word length (optional)
+        - Capitalized letters = required (must be in any found word)
+        - Lowercase letters = optional (can be used but not required)
+        - .Letter = positional letter (Letter must be at that specific position)
+        - Number at end = exchanges remaining
+        
+        Examples:
+        - "ABCdef3" = any length, A,B,C required, d,e,f optional, 3 exchanges
+        - "7ABCdef3" = 7-letter words, A,B,C required, d,e,f optional, 3 exchanges  
+        - "A.Bcd.Ef2" = any length, A required, B at position 2, c,d optional, E at position 5, f optional, 2 exchanges
+        - "8A.Bcd.Ef2" = 8-letter words, A required, B at position 2, c,d optional, E at position 5, f optional, 2 exchanges
+        
+        Returns:
+            Tuple of (all_letters, exchanges, required_letters, target_length, positional_letters)
+        """
+        # Extract number at the end (exchanges)
         match = re.search(r'(\d+)$', input_str.strip())
         if match:
             exchanges = int(match.group(1))
-            letters_part = input_str[:match.start()].strip()
+            remaining_part = input_str[:match.start()].strip()
         else:
             exchanges = 0
-            letters_part = input_str.strip()
+            remaining_part = input_str.strip()
         
-        # Convert to list of individual letters
-        letters = list(letters_part.upper())
-        return letters, exchanges
+        # Extract number at the start (target length)
+        target_length = None
+        match = re.match(r'^(\d+)', remaining_part)
+        if match:
+            target_length = int(match.group(1))
+            letters_part = remaining_part[match.end():].strip()
+        else:
+            letters_part = remaining_part
+        
+        # Parse letters and identify required letters, positional letters
+        required_letters = []
+        all_letters = []
+        positional_letters = {}  # position -> letter
+        current_position = 0  # Track position for .Letter syntax
+        
+        i = 0
+        while i < len(letters_part):
+            char = letters_part[i]
+            
+            if char == '.':
+                # Next character is a positional letter
+                if i + 1 < len(letters_part):
+                    pos_char = letters_part[i + 1]
+                    if pos_char != '*' and pos_char.isalpha():
+                        # Position 1-indexed for user, but we'll store 0-indexed
+                        positional_letters[current_position] = pos_char.upper()
+                        all_letters.append(pos_char.upper())
+                        if pos_char.isupper():
+                            required_letters.append(pos_char.upper())
+                        current_position += 1
+                        i += 2  # Skip the . and the letter
+                        continue
+                i += 1
+            elif char == '*':
+                all_letters.append('*')
+                current_position += 1
+                i += 1
+            elif char.isupper():
+                # Capitalized = required letter
+                required_letters.append(char)
+                all_letters.append(char)
+                current_position += 1
+                i += 1
+            elif char.islower():
+                # Lowercase = optional letter, convert to uppercase for processing
+                all_letters.append(char.upper())
+                current_position += 1
+                i += 1
+            else:
+                # Skip unknown characters
+                i += 1
+        
+        return all_letters, exchanges, required_letters, target_length, positional_letters
     
-    def generate_word_combinations(self, letters: List[str], target_length: int = None) -> Set[str]:
+    def _contains_required_letters(self, word: str, required_letters: List[str]) -> bool:
+        """Check if word contains all required letters."""
+        if not required_letters:
+            return True
+        
+        word_upper = word.upper()
+        word_counts = Counter(word_upper)
+        required_counts = Counter(required_letters)
+        
+        # Check if word has at least the required count of each required letter
+        for letter, count in required_counts.items():
+            if word_counts.get(letter, 0) < count:
+                return False
+        
+        return True
+    
+    def _matches_positional_letters(self, word: str, positional_letters: Dict[int, str]) -> bool:
+        """Check if word matches positional letter requirements."""
+        if not positional_letters:
+            return True
+        
+        word_upper = word.upper()
+        for position, required_letter in positional_letters.items():
+            if position >= len(word_upper) or word_upper[position] != required_letter:
+                return False
+        
+        return True
+    
+    def generate_word_combinations(self, letters: List[str], target_length: int = None, required_letters: List[str] = None, positional_letters: Dict[int, str] = None) -> Set[str]:
         """Generate all possible word combinations from given letters using parallel processing."""
+        if required_letters is None:
+            required_letters = []
+        if positional_letters is None:
+            positional_letters = {}
+            
         letter_counts = Counter(letters)
         
         # If no target length specified, try all lengths up to 9 letters (Wordatro max)
@@ -327,7 +427,11 @@ class WordatroCheater:
         
         if len(lengths_to_try) == 1:
             # Single length - no need for threading
-            return self._find_words_of_length(letters, lengths_to_try[0])
+            words = self._find_words_of_length(letters, lengths_to_try[0])
+            # Filter for required letters and positional letters
+            return {word for word in words 
+                   if self._contains_required_letters(word, required_letters) 
+                   and self._matches_positional_letters(word, positional_letters)}
         
         # Multiple lengths - use parallel processing
         valid_words = set()
@@ -343,7 +447,11 @@ class WordatroCheater:
             for future in concurrent.futures.as_completed(future_to_length):
                 try:
                     words_for_length = future.result()
-                    valid_words.update(words_for_length)
+                    # Filter for required letters and positional letters
+                    filtered_words = {word for word in words_for_length 
+                                    if self._contains_required_letters(word, required_letters) 
+                                    and self._matches_positional_letters(word, positional_letters)}
+                    valid_words.update(filtered_words)
                 except Exception as e:
                     length = future_to_length[future]
                     print(f"Error processing length {length}: {e}")
@@ -442,29 +550,41 @@ class WordatroCheater:
     
 
     
-    def find_exchange_opportunities(self, letters: List[str], exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
+    def find_exchange_opportunities(self, letters: List[str], exchanges_remaining: int, required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None) -> List[Tuple[str, int, List[str]]]:
         """Analyze least useful letters based on their usage in found words."""
         if exchanges_remaining <= 0:
             return []
         
+        if required_letters is None:
+            required_letters = []
+        if positional_letters is None:
+            positional_letters = {}
+        
         current_letters = letters.copy()
         
         # Get current words
-        current_words = self.generate_word_combinations(current_letters)
+        current_words = self.generate_word_combinations(current_letters, target_length=target_length,
+                                                      required_letters=required_letters, 
+                                                      positional_letters=positional_letters)
         
         if not current_words:
             return []
         
         # Analyze letter usage in found words to identify least useful letters
-        letter_usage_analysis = self._analyze_letter_usage_in_words(current_letters, current_words)
+        letter_usage_analysis = self._analyze_letter_usage_in_words(current_letters, current_words, required_letters, target_length, positional_letters)
         
         # Format as least useful letters ranked by usefulness
         suggestions = self._format_least_useful_letters(letter_usage_analysis, exchanges_remaining)
         
         return suggestions
     
-    def _analyze_letter_usage_in_words(self, input_letters: List[str], found_words: Set[str]) -> Dict:
+    def _analyze_letter_usage_in_words(self, input_letters: List[str], found_words: Set[str], required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None) -> Dict:
         """Analyze how destructive removing each letter would be to scoring potential."""
+        if required_letters is None:
+            required_letters = []
+        if positional_letters is None:
+            positional_letters = {}
+            
         input_letter_counts = Counter(input_letters)
         
         # Calculate the destructive impact of removing each letter
@@ -509,7 +629,7 @@ class WordatroCheater:
                             break
                     
                     if removed_count > 0:
-                        remaining_words = self.generate_word_combinations(test_letters)
+                        remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, required_letters=required_letters, positional_letters=positional_letters)
                         remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
                         
                         words_lost = total_words - len(remaining_words)
@@ -531,12 +651,17 @@ class WordatroCheater:
                     score_lost = 0
                     removability_score = 0
                 
+                # Calculate exchange potential by substituting with wildcard
+                exchange_potential = self._calculate_exchange_potential(input_letters, letter, 
+                                                                      required_letters, target_length, 
+                                                                      positional_letters, total_score_potential)
+                
             else:
                 # No excess letters - removing any will be destructive
                 test_letters = input_letters.copy()
                 test_letters.remove(letter)
                 
-                remaining_words = self.generate_word_combinations(test_letters)
+                remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, required_letters=required_letters, positional_letters=positional_letters)
                 remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
                 
                 words_lost = total_words - len(remaining_words)
@@ -545,6 +670,11 @@ class WordatroCheater:
                 # All letters of this type are needed, so impact is high
                 removability_score = score_lost
                 removal_impacts = {}  # No removal impacts to show since no excess
+                
+                # Calculate exchange potential by substituting with wildcard
+                exchange_potential = self._calculate_exchange_potential(input_letters, letter, 
+                                                                      required_letters, target_length, 
+                                                                      positional_letters, total_score_potential)
             
             # Build the analysis record
             letter_analysis[letter] = {
@@ -557,68 +687,153 @@ class WordatroCheater:
                 'removability_score': removability_score,
                 'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0,
                 'is_excess_available': truly_excess > 0,
-                'removal_impacts': removal_impacts if truly_excess > 0 else {}
+                'removal_impacts': removal_impacts if truly_excess > 0 else {},
+                'exchange_potential': exchange_potential
             }
         
         return letter_analysis
     
+    def _calculate_exchange_potential(self, input_letters: List[str], target_letter: str, 
+                                    required_letters: List[str], target_length: int, 
+                                    positional_letters: Dict[int, str], baseline_score: int) -> Dict:
+        """Calculate the average score potential if we exchange target_letter for each possible letter."""
+        
+        # Create test letters with wildcard substitution
+        test_letters = input_letters.copy()
+        
+        # Find first occurrence of target_letter and replace with wildcard
+        if target_letter in test_letters:
+            idx = test_letters.index(target_letter)
+            test_letters[idx] = '*'
+        else:
+            # Letter not found, no exchange potential
+            return {
+                'average_score_potential': 0,
+                'best_substitute': None,
+                'best_substitute_score': 0,
+                'exchange_gain': 0,
+                'exchange_percentage_gain': 0
+            }
+        
+        # Test all 26 letters as substitutions
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        substitute_scores = []
+        best_substitute = None
+        best_score = 0
+        
+        for substitute_letter in alphabet:
+            # Skip if this would violate required letter constraints
+            # (i.e., if we're removing a required letter, the substitute must also be required)
+            if target_letter in required_letters and substitute_letter not in required_letters:
+                continue
+                
+            # Create test scenario with this substitute
+            substitute_test_letters = test_letters.copy()
+            substitute_test_letters[substitute_test_letters.index('*')] = substitute_letter
+            
+            try:
+                # Generate words with this substitution
+                substitute_words = self.generate_word_combinations(substitute_test_letters, 
+                                                                 target_length=target_length,
+                                                                 required_letters=required_letters, 
+                                                                 positional_letters=positional_letters)
+                
+                if substitute_words:
+                    substitute_score = sum(self.calculate_word_score(word) for word in substitute_words)
+                    substitute_scores.append(substitute_score)
+                    
+                    if substitute_score > best_score:
+                        best_score = substitute_score
+                        best_substitute = substitute_letter
+                else:
+                    substitute_scores.append(0)
+                    
+            except Exception:
+                # If generation fails, treat as 0 score
+                substitute_scores.append(0)
+        
+        # Calculate average potential
+        if substitute_scores:
+            average_score_potential = sum(substitute_scores) / len(substitute_scores)
+            exchange_gain = average_score_potential - baseline_score
+            exchange_percentage_gain = (exchange_gain / baseline_score * 100) if baseline_score > 0 else 0
+        else:
+            average_score_potential = 0
+            exchange_gain = 0
+            exchange_percentage_gain = 0
+        
+        return {
+            'average_score_potential': average_score_potential,
+            'best_substitute': best_substitute,
+            'best_substitute_score': best_score,
+            'exchange_gain': exchange_gain,
+            'exchange_percentage_gain': exchange_percentage_gain,
+            'tested_substitutes': len(substitute_scores)
+        }
+    
     def _format_least_useful_letters(self, letter_analysis: Dict, exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
         """Format the least useful letters analysis for display."""
         
-        # Sort letters by removability (least destructive to remove first - best candidates for swapping)
-        letters_by_removability = []
+        # Sort letters by exchange potential vs removal impact
+        letters_by_exchange_value = []
         for letter, analysis in letter_analysis.items():
             if letter != '*' and analysis['available_count'] > 0:
-                # Lower removability_score = less destructive to remove = better candidate for exchange
-                letters_by_removability.append((letter, analysis['removability_score'], analysis))
+                # Calculate exchange value: positive gain is good, negative loss is bad
+                exchange_gain = analysis['exchange_potential']['exchange_gain']
+                # Combined score: high exchange gain = good, low removal impact = good
+                # Use negative removal impact so higher combined score = better exchange candidate
+                combined_score = exchange_gain - analysis['removability_score']
+                letters_by_exchange_value.append((letter, combined_score, analysis))
         
-        letters_by_removability.sort(key=lambda x: x[1])  # Sort by removability (lowest destructive impact first)
+        letters_by_exchange_value.sort(key=lambda x: x[1], reverse=True)  # Sort by exchange value (highest first)
         
-        if not letters_by_removability:
+        if not letters_by_exchange_value:
             return []
         
         # Format the results
         suggestions = []
         
-        # Create a single suggestion showing least destructive letters to remove
-        if letters_by_removability:
-            suggestion_lines = ["Letters ranked by exchange priority (least destructive impact first):"]
+        # Create a single suggestion showing best exchange candidates
+        if letters_by_exchange_value:
+            suggestion_lines = ["Letters ranked by exchange potential (best candidates first):"]
             
-            for i, (letter, removability_score, analysis) in enumerate(letters_by_removability, 1):
+            for i, (letter, exchange_value, analysis) in enumerate(letters_by_exchange_value, 1):
                 if analysis['words_using_letter'] == 0:
-                    description = f"  {i}. {letter} - unused in any words (safe to exchange)"
-                else:
-                    # Build description with impact and duplicate info
-                    if analysis['excess_letters'] > 0 and analysis['removal_impacts']:
-                        # Show impact of removing different numbers of excess letters
-                        duplicate_info = f"has {analysis['excess_letters']} excess duplicate{'s' if analysis['excess_letters'] > 1 else ''}"
-                        
-                        # Build removal impact summary with line wrapping
-                        impact_details = []
-                        for remove_count in sorted(analysis['removal_impacts'].keys()):
-                            impact = analysis['removal_impacts'][remove_count]
-                            if remove_count <= analysis['excess_letters']:
-                                # This is removing excess letters
-                                safety = "safe" if impact['destruction_percentage'] < 5 else "caution"
-                                impact_details.append(f"rm{remove_count}:{impact['destruction_percentage']:.1f}%({safety})")
-                            else:
-                                # This is removing needed letters
-                                impact_details.append(f"rm{remove_count}:{impact['destruction_percentage']:.1f}%(risky)")
-                        
-                        # Split impact details across lines if too long
-                        base_line = f"  {i}. {letter} - {duplicate_info}"
-                        impact_summary = ", ".join(impact_details)
-                        
-                        if len(base_line + ", " + impact_summary) > 80:
-                            # Split to multiple lines
-                            description = base_line + "\n      " + impact_summary
-                        else:
-                            description = base_line + ", " + impact_summary
+                    # Show exchange potential for unused letters
+                    ep = analysis['exchange_potential']
+                    if ep['best_substitute']:
+                        description = f"  {i}. {letter} - unused, exchange for {ep['best_substitute']} = +{ep['exchange_percentage_gain']:.1f}% avg gain"
                     else:
-                        # No excess letters - show standard impact
-                        impact_desc = f"removing loses {analysis['destruction_percentage']:.1f}% of score potential"
-                        word_info = f"used in {analysis['words_using_letter']} words, "
-                        description = f"  {i}. {letter} - {word_info}{impact_desc}"
+                        description = f"  {i}. {letter} - unused in any words (safe to exchange)"
+                else:
+                    # Build description with exchange potential vs removal impact
+                    ep = analysis['exchange_potential']
+                    
+                    # Core info: removal impact
+                    removal_info = f"removing loses {analysis['destruction_percentage']:.1f}%"
+                    
+                    # Exchange potential info
+                    if ep['exchange_gain'] > 0:
+                        exchange_info = f"exchange avg +{ep['exchange_percentage_gain']:.1f}%"
+                        if ep['best_substitute']:
+                            exchange_info += f" (best: {ep['best_substitute']})"
+                        verdict = "GOOD TRADE"
+                    elif ep['exchange_gain'] < 0:
+                        exchange_info = f"exchange avg {ep['exchange_percentage_gain']:.1f}%"
+                        verdict = "BAD TRADE"
+                    else:
+                        exchange_info = "exchange neutral"
+                        verdict = "NEUTRAL"
+                    
+                    # Build compact description
+                    base_desc = f"  {i}. {letter} - {removal_info}, {exchange_info} ({verdict})"
+                    
+                    # Add excess info if relevant
+                    if analysis['excess_letters'] > 0:
+                        excess_info = f" | {analysis['excess_letters']} excess"
+                        description = base_desc + excess_info
+                    else:
+                        description = base_desc
                         
                 suggestion_lines.append(description)
             
@@ -654,13 +869,16 @@ class WordatroCheater:
         description = f"Exchange {exchange_count} letters: {old_letters} → {new_letters}"
         return (description, test_letters, old_letters)
     
-    def _test_exchange_scenario(self, scenario: Tuple[str, List[str], List[str]], current_best_score: int) -> Tuple[str, int, List[str]] or None:
+    def _test_exchange_scenario(self, scenario: Tuple[str, List[str], List[str]], current_best_score: int, required_letters: List[str] = None) -> Tuple[str, int, List[str]] or None:
         """Test a single exchange scenario."""
+        if required_letters is None:
+            required_letters = []
+            
         description, test_letters, old_letters = scenario
         
         try:
             # Generate words with new letter combination
-            test_words = self.generate_word_combinations(test_letters)
+            test_words = self.generate_word_combinations(test_letters, required_letters=required_letters)
             if not test_words:
                 return None
             
@@ -679,19 +897,25 @@ class WordatroCheater:
     
     def find_best_words(self, input_str: str) -> Dict:
         """Main function to find best words and suggestions."""
-        letters, exchanges_remaining = self.parse_input(input_str)
+        letters, exchanges_remaining, required_letters, target_length, positional_letters = self.parse_input(input_str)
         
-        # Generate all possible words
-        valid_words = self.generate_word_combinations(letters)
+        # Generate all possible words (filtering for required letters, target length, and positional letters)
+        valid_words = self.generate_word_combinations(letters, target_length=target_length, 
+                                                    required_letters=required_letters, 
+                                                    positional_letters=positional_letters)
         
         if not valid_words:
             return {
                 'input': input_str,
                 'parsed_letters': letters,
+                'required_letters': required_letters,
+                'target_length': target_length,
+                'positional_letters': positional_letters,
                 'exchanges_remaining': exchanges_remaining,
                 'top_words': [],
                 'exchange_suggestions': [],
-                'message': 'No valid words found with current letters.'
+                'total_words_found': 0,
+                'message': 'No valid words found with current letters and constraints.'
             }
         
         # Score all words and get top 10
@@ -700,11 +924,14 @@ class WordatroCheater:
         top_10 = scored_words[:10]
         
         # Get exchange suggestions
-        exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining)
+        exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining, required_letters, target_length, positional_letters)
         
         return {
             'input': input_str,
             'parsed_letters': letters,
+            'required_letters': required_letters,
+            'target_length': target_length,
+            'positional_letters': positional_letters,
             'exchanges_remaining': exchanges_remaining,
             'top_words': top_10,
             'exchange_suggestions': exchange_suggestions,
@@ -722,6 +949,20 @@ class WordatroCheater:
         print(f"{'='*header_width}")
         print(f"Input: {results['input']}")
         print(f"Letters: {' '.join(results['parsed_letters'])}")
+        
+        # Show constraints if any
+        constraints = []
+        if results.get('target_length'):
+            constraints.append(f"Length: {results['target_length']}")
+        if results.get('required_letters'):
+            constraints.append(f"Required: {', '.join(results['required_letters'])}")
+        if results.get('positional_letters'):
+            pos_info = [f"pos{pos+1}:{letter}" for pos, letter in results['positional_letters'].items()]
+            constraints.append(f"Positions: {', '.join(pos_info)}")
+        
+        if constraints:
+            print(f"Constraints: {' | '.join(constraints)}")
+        
         print(f"Exchanges: {results['exchanges_remaining']} | Words found: {results['total_words_found']}")
         
         print(f"\n{'='*20} TOP 10 WORDS {'='*20}")
