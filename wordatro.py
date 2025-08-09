@@ -5,6 +5,7 @@ import os
 import sys
 import random
 import concurrent.futures
+import atexit
 from threading import Lock
 from collections import defaultdict, Counter
 from typing import List, Set, Tuple, Dict
@@ -21,11 +22,22 @@ class WordatroCheater:
             'S': 1, 'T': 1, 'U': 1, 'V': 4, 'W': 4, 'X': 8, 'Y': 4, 'Z': 10
         }
         
+        # Scrabble tile frequencies for weighted probability calculations
+        self.tile_frequencies = {
+            'E': 12, 'A': 9, 'I': 9, 'O': 8, 'N': 6, 'R': 6, 'T': 6, 'L': 4, 'S': 4, 'U': 4, 'D': 4, 'G': 3,
+            'B': 2, 'C': 2, 'M': 2, 'P': 2, 'F': 2, 'H': 2, 'V': 2, 'W': 2, 'Y': 2,
+            'K': 1, 'J': 1, 'X': 1, 'Q': 1, 'Z': 1
+        }
+        self.total_tiles = sum(self.tile_frequencies.values())  # 98 total tiles
+        
         self.dictionary_file = dictionary_file
         self.cache_file = dictionary_file.replace('.txt', '.word')
         
         # Load dictionary and indexes (with caching)
         self._load_or_build_data(force_regenerate)
+        
+        # Register cache persistence on exit
+        atexit.register(self._save_cache_on_exit)
     
     def _load_or_build_data(self, force_regenerate: bool = False):
         """Load cached data or build from scratch if needed."""
@@ -34,7 +46,10 @@ class WordatroCheater:
         if not force_regenerate and self._should_use_cache():
             print(f"Loading cached dictionary data from {self.cache_file}...")
             if self._load_cached_data():
-                print(f"✓ Loaded {len(self.dictionary)} words from cache")
+                print(f"Loaded {len(self.dictionary)} words from cache")
+                # Prime the substitution cache with common letter patterns if it's relatively empty
+                if len(self.substitution_cache) < 250:  # Less than 2.5% full
+                    self._prime_substitution_cache(target_fullness=0.025)  # Prime to 2.5%
                 return
             else:
                 print("⚠ Cache load failed, rebuilding...")
@@ -45,7 +60,10 @@ class WordatroCheater:
         
         # Save to cache
         self._save_cached_data()
-        print(f"✓ Dictionary cached to {self.cache_file}")
+        print(f"Dictionary cached to {self.cache_file}")
+        
+        # Prime the substitution cache with common letter patterns
+        self._prime_substitution_cache(target_fullness=0.025)  # Prime to 2.5% for fresh builds
     
     def _should_use_cache(self) -> bool:
         """Check if cached data exists and is newer than source dictionary."""
@@ -130,7 +148,12 @@ class WordatroCheater:
         print("Forcing cache regeneration...")
         self._build_from_scratch()
         self._save_cached_data()
-        print(f"✓ Cache regenerated and saved to {self.cache_file}")
+        print(f"Cache regenerated and saved to {self.cache_file}")
+    
+    def save_cache(self):
+        """Manually save the current cache to disk."""
+        self._save_cached_data()
+        print(f"Cache saved with {len(self.substitution_cache)} entries")
     
     def _load_dictionary(self, filename: str) -> Set[str]:
         """Load dictionary from CSV file into a set."""
@@ -189,13 +212,14 @@ class WordatroCheater:
         
         # Split dictionary into chunks for parallel processing
         words_list = list(self.dictionary)
-        chunk_size = max(1000, len(words_list) // (os.cpu_count() or 4))
+        safe_workers = self._get_safe_worker_count()
+        chunk_size = max(1000, len(words_list) // safe_workers)
         word_chunks = [words_list[i:i + chunk_size] for i in range(0, len(words_list), chunk_size)]
         
-        print(f"Processing {len(words_list)} words in {len(word_chunks)} chunks using {os.cpu_count() or 4} threads...")
+        print(f"Processing {len(words_list)} words in {len(word_chunks)} chunks using {safe_workers} threads...")
         
         # Process chunks in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=safe_workers) as executor:
             futures = [executor.submit(self._process_word_chunk, chunk) for chunk in word_chunks]
             
             # Wait for all chunks to complete
@@ -446,7 +470,7 @@ class WordatroCheater:
         # Multiple lengths - use parallel processing
         valid_words = set()
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(lengths_to_try), os.cpu_count())) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(lengths_to_try), self._get_safe_worker_count())) as executor:
             # Submit tasks for each length
             future_to_length = {
                 executor.submit(self._find_words_of_length, letters, length): length 
@@ -572,13 +596,17 @@ class WordatroCheater:
         
         current_letters = letters.copy()
         
-        # Get current words
+        # Get current words with progress indication
+        print("🔍 Generating word combinations...")
         current_words = self.generate_word_combinations(current_letters, target_length=target_length,
                                                       required_letters=required_letters, 
                                                       positional_letters=positional_letters)
         
         if not current_words:
             return []
+        
+        print(f"✓ Found {len(current_words)} words")
+        print("🧮 Analyzing exchange potential...")
         
         # Analyze letter usage in found words to identify least useful letters
         letter_usage_analysis = self._analyze_letter_usage_in_words(current_letters, current_words, required_letters, target_length, positional_letters)
@@ -614,7 +642,7 @@ class WordatroCheater:
             return letter_analysis
         
         # Use thread pool to analyze letters in parallel
-        max_workers = min(len(unique_letters), 4)  # Limit to avoid too much overhead
+        max_workers = min(len(unique_letters), self._get_safe_worker_count())  # Safe core count
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit analysis tasks for each letter
@@ -626,18 +654,64 @@ class WordatroCheater:
                                        required_letters, target_length, positional_letters)
                 future_to_letter[future] = letter
             
-            # Collect results
+            # Collect results with progress bar
+            completed = 0
+            total_letters = len(unique_letters)
+            
             for future in concurrent.futures.as_completed(future_to_letter):
                 letter = future_to_letter[future]
                 try:
                     analysis_result = future.result()
                     if analysis_result:
                         letter_analysis[letter] = analysis_result
+                    
+                    # Update progress
+                    completed += 1
+                    progress = completed / total_letters
+                    bar_length = 20
+                    filled_length = int(bar_length * progress)
+                    bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                    print(f'\r  [{bar}] {progress:.0%} Analyzing letter {letter} ({completed}/{total_letters})', end='', flush=True)
+                    
                 except Exception as e:
                     # Log error but continue with other letters
-                    print(f"Error analyzing letter {letter}: {e}")
+                    completed += 1
+                    print(f"\rError analyzing letter {letter}: {e}")
+            
+            # Clear progress bar
+            print('\r' + ' ' * 70 + '\r', end='', flush=True)
         
         return letter_analysis
+    
+    def _get_safe_worker_count(self) -> int:
+        """Get a safe number of worker threads, accounting for hyperthreading and system resources."""
+        try:
+            # Try to get physical cores (not hyperthreaded)
+            physical_cores = os.cpu_count()
+            try:
+                # If psutil is available, get physical cores
+                import psutil
+                physical_cores = psutil.cpu_count(logical=False)
+            except ImportError:
+                # Fallback: assume half of logical cores are physical (typical hyperthreading)
+                logical_cores = os.cpu_count() or 4
+                physical_cores = max(1, logical_cores // 2)
+            
+            # Reserve 2 cores for system, use at least 1
+            safe_count = max(1, physical_cores - 2)
+            return safe_count
+        except Exception:
+            # Conservative fallback
+            return 2
+    
+    def _save_cache_on_exit(self):
+        """Save cache to disk when the program exits."""
+        try:
+            if hasattr(self, 'substitution_cache') and len(self.substitution_cache) > 0:
+                self._save_cached_data()
+                print(f"\nCache saved with {len(self.substitution_cache)} entries")
+        except Exception:
+            pass  # Silent fail on exit
     
     def _analyze_single_letter(self, letter: str, input_letter_counts: Counter, input_letters: List[str],
                              found_words: Set[str], total_words: int, total_score_potential: int,
@@ -652,34 +726,55 @@ class WordatroCheater:
         # Determine how many of this letter are actually excess
         truly_excess = max(0, available_count - max_usage_in_word)
         
-        # Test impact of removing letters, starting with excess ones
-        if truly_excess > 0:
+        # Test impact of removing letters for any duplicates
+        if available_count > 1:
             # Test removing different numbers of this letter to find the safe removal count
             removal_impacts = {}
             
-            for num_to_remove in range(1, min(truly_excess + 2, available_count + 1)):
+            # Test sequential replacement: 1, 2, 3, ... up to available_count
+            for num_to_remove in range(1, min(available_count, 3) + 1):  # Limit to 3 max for performance
                 test_letters = input_letters.copy()
                 
-                # Remove the specified number of instances
+                # Remove exactly num_to_remove instances of this letter
                 removed_count = 0
                 for _ in range(num_to_remove):
-                    if letter in test_letters:
+                    try:
                         test_letters.remove(letter)
                         removed_count += 1
-                    else:
+                    except ValueError:
+                        # No more instances to remove
                         break
                 
-                if removed_count > 0:
-                    remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, 
+                if removed_count == num_to_remove:  # Only proceed if we removed the exact amount
+                    # Add wildcards for the removed letters
+                    test_letters.extend(['*'] * removed_count)
+                    
+                    # Calculate exchange potential using the same method as single letters
+                    exchange_potential = self._calculate_exchange_potential(
+                        test_letters, '*', required_letters, target_length, positional_letters, total_score_potential
+                    )
+                    
+                    # Calculate the destruction impact (score lost by removal)
+                    test_letters_no_wildcards = input_letters.copy()
+                    for _ in range(removed_count):
+                        test_letters_no_wildcards.remove(letter)
+                    
+                    remaining_words = self.generate_word_combinations(test_letters_no_wildcards, target_length=target_length, 
                                                                     required_letters=required_letters, positional_letters=positional_letters)
                     remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
                     
                     words_lost = total_words - len(remaining_words)
                     score_lost = total_score_potential - remaining_score_potential
                     
+                    # Net effect: exchange potential minus destruction impact
+                    exchange_gain = exchange_potential.get('exchange_gain', 0)
+                    net_score_change = exchange_gain - score_lost
+                    
                     removal_impacts[removed_count] = {
                         'words_lost': words_lost,
                         'score_lost': score_lost,
+                        'exchange_potential': exchange_potential,
+                        'net_score_change': net_score_change,
                         'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0
                     }
             
@@ -693,7 +788,7 @@ class WordatroCheater:
                 score_lost = 0
                 removability_score = 0
         else:
-            # No excess letters - removing any will be destructive
+            # Single letter - removing it will be destructive
             test_letters = input_letters.copy()
             test_letters.remove(letter)
             
@@ -704,9 +799,9 @@ class WordatroCheater:
             words_lost = total_words - len(remaining_words)
             score_lost = total_score_potential - remaining_score_potential
             
-            # All letters of this type are needed, so impact is high
+            # Single letter removal impact is always high
             removability_score = score_lost
-            removal_impacts = {}  # No removal impacts to show since no excess
+            removal_impacts = {}  # No removal breakdown for single letters
         
         # Calculate exchange potential by substituting with wildcard
         exchange_potential = self._calculate_exchange_potential(input_letters, letter, 
@@ -724,7 +819,7 @@ class WordatroCheater:
             'removability_score': removability_score,
             'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0,
             'is_excess_available': truly_excess > 0,
-            'removal_impacts': removal_impacts if truly_excess > 0 else {},
+            'removal_impacts': removal_impacts,  # Always show removal impacts for duplicates
             'exchange_potential': exchange_potential
         }
     
@@ -781,12 +876,12 @@ class WordatroCheater:
             }
         
         # Use parallel processing for substitution testing
-        substitute_scores = []
+        substitute_results = []  # Will store (letter, score) tuples
         best_substitute = None
         best_score = 0
         
         # Create thread pool for parallel substitution testing
-        max_workers = min(len(valid_substitutes), 8)  # Limit threads to avoid overhead
+        max_workers = min(len(valid_substitutes), self._get_safe_worker_count())  # Safe core count
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all substitution tests
@@ -802,18 +897,27 @@ class WordatroCheater:
                 substitute_letter = future_to_letter[future]
                 try:
                     substitute_score = future.result()
-                    substitute_scores.append(substitute_score)
+                    substitute_results.append((substitute_letter, substitute_score))
                     
                     if substitute_score > best_score:
                         best_score = substitute_score
                         best_substitute = substitute_letter
                         
                 except Exception:
-                    substitute_scores.append(0)
+                    substitute_results.append((substitute_letter, 0))
         
-        # Calculate average potential
-        if substitute_scores:
-            average_score_potential = sum(substitute_scores) / len(substitute_scores)
+        # Calculate weighted average potential based on tile frequencies
+        if substitute_results:
+            weighted_sum = 0
+            total_weight = 0
+            
+            for substitute_letter, score in substitute_results:
+                # Get tile frequency weight for this letter
+                weight = self.tile_frequencies.get(substitute_letter, 1)  # Default weight of 1 for missing letters
+                weighted_sum += score * weight
+                total_weight += weight
+            
+            average_score_potential = weighted_sum / total_weight if total_weight > 0 else 0
             exchange_gain = average_score_potential - baseline_score
             exchange_percentage_gain = (exchange_gain / baseline_score * 100) if baseline_score > 0 else 0
         else:
@@ -827,7 +931,8 @@ class WordatroCheater:
             'best_substitute_score': best_score,
             'exchange_gain': exchange_gain,
             'exchange_percentage_gain': exchange_percentage_gain,
-            'tested_substitutes': len(substitute_scores)
+            'tested_substitutes': len(substitute_results),
+            'weighted_calculation': True  # Indicates this used tile frequency weighting
         }
     
     def _test_single_substitution(self, test_letters: List[str], substitute_letter: str,
@@ -945,10 +1050,21 @@ class WordatroCheater:
                     # Build compact description
                     base_desc = f"  {i}. {letter} - {removal_info}, {exchange_info} ({verdict})"
                     
-                    # Add excess info if relevant
+                    # Add detailed duplicate removal recommendations
                     if analysis['excess_letters'] > 0:
-                        excess_info = f" | {analysis['excess_letters']} excess"
-                        description = base_desc + excess_info
+                        removal_recommendations = self._get_removal_recommendations(analysis)
+                        if removal_recommendations:
+                            description = base_desc + f" | {removal_recommendations}"
+                        else:
+                            excess_info = f" | {analysis['excess_letters']} excess"
+                            description = base_desc + excess_info
+                    elif analysis['available_count'] > 1:
+                        # Show removal impacts even for non-excess duplicates
+                        removal_recommendations = self._get_removal_recommendations(analysis)
+                        if removal_recommendations:
+                            description = base_desc + f" | {removal_recommendations}"
+                        else:
+                            description = base_desc
                     else:
                         description = base_desc
                         
@@ -958,6 +1074,226 @@ class WordatroCheater:
             suggestions.append((suggestion_text, 0, []))  # No score or new letters since this is just analysis
         
         return suggestions
+    
+    def _get_removal_recommendations(self, analysis: Dict) -> str:
+        """Generate specific recommendations for removing duplicate letters."""
+        # Show removal impacts for any letter that appears multiple times
+        if not analysis['removal_impacts'] or analysis['available_count'] <= 1:
+            return ""
+        
+        recommendations = []
+        
+        for remove_count in sorted(analysis['removal_impacts'].keys()):
+            impact = analysis['removal_impacts'][remove_count]
+            destruction_pct = impact['destruction_percentage']
+            net_change = impact.get('net_score_change', 0)
+            
+            # Categorize safety level and trade verdict based on net score change
+            if net_change > 100:
+                safety = "GAIN"
+                trade_verdict = "GOOD TRADE"
+            elif net_change > 0:
+                safety = "BENEFIT"
+                trade_verdict = "GOOD TRADE"
+            elif destruction_pct == 0:
+                safety = "SAFE"
+                trade_verdict = "NEUTRAL"
+            elif destruction_pct < 5:
+                safety = "OK"
+                trade_verdict = "MINOR LOSS"
+            elif destruction_pct < 15:
+                safety = "CAUTION"
+                trade_verdict = "BAD TRADE"
+            else:
+                safety = "RISKY"
+                trade_verdict = "BAD TRADE"
+            
+            if net_change != 0:
+                recommendations.append(f"rm{remove_count}:{destruction_pct:.1f}%({safety}:{net_change:+.0f} {trade_verdict})")
+            else:
+                recommendations.append(f"rm{remove_count}:{destruction_pct:.1f}%({safety} {trade_verdict})")
+        
+        if recommendations:
+            return "Remove: " + ", ".join(recommendations)
+        return ""
+    
+    def _prime_substitution_cache(self, target_fullness=0.10):
+        """Prime the substitution cache with realistic letter combinations based on tile frequencies.
+        
+        Args:
+            target_fullness (float): Target cache fullness as a fraction (0.10 = 10%, 0.50 = 50%)
+        """
+        target_entries = int(self.substitution_cache_limit * target_fullness)
+        current_entries = len(self.substitution_cache)
+        
+        if current_entries >= target_entries:
+            print(f"Cache already at target fullness ({current_entries}/{target_entries} entries, {current_entries/self.substitution_cache_limit*100:.1f}%)")
+            return
+        
+        entries_needed = target_entries - current_entries
+        print(f"Priming cache to {target_fullness*100:.0f}% fullness ({target_entries:,} entries)...")
+        print(f"Current: {current_entries:,} entries, Need: {entries_needed:,} more")
+        
+        # Tile frequency distribution (like Scrabble)
+        tile_pool = (
+            ['E'] * 12 + ['A'] * 9 + ['I'] * 9 + ['O'] * 8 + 
+            ['N'] * 6 + ['R'] * 6 + ['T'] * 6 + 
+            ['L'] * 4 + ['S'] * 4 + ['U'] * 4 + ['D'] * 4 + 
+            ['G'] * 3 + 
+            ['B'] * 2 + ['C'] * 2 + ['M'] * 2 + ['P'] * 2 + 
+            ['F'] * 2 + ['H'] * 2 + ['V'] * 2 + ['W'] * 2 + ['Y'] * 2 + 
+            ['K'] * 1 + ['J'] * 1 + ['X'] * 1 + ['Q'] * 1 + ['Z'] * 1
+        )
+        
+        initial_cache_size = len(self.substitution_cache)
+        
+        # Generate random combinations based on tile frequencies
+        import random
+        random.seed(42)  # Reproducible results
+        
+        # Calculate combinations needed (estimate ~3 entries per combination)
+        estimated_combinations = max(20, min(200, entries_needed // 3))
+        total_combinations = estimated_combinations
+        for i in range(total_combinations):
+            try:
+                # Update progress bar with cache stats
+                progress = (i + 1) / total_combinations
+                bar_length = 25
+                filled_length = int(bar_length * progress)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                current_cache_size = len(self.substitution_cache)
+                new_entries = current_cache_size - initial_cache_size
+                print(f'\r  [{bar}] {progress:.0%} ({i + 1}/{total_combinations}) | Cache: +{new_entries} entries', end='', flush=True)
+                
+                # Shuffle the tile pool and draw 7-10 letters
+                shuffled_pool = tile_pool.copy()
+                random.shuffle(shuffled_pool)
+                
+                # Draw a random number of letters (7-10)
+                draw_count = random.randint(7, 10)
+                drawn_letters = shuffled_pool[:draw_count]
+                
+                # Convert to string and add random exchange count (1-3)
+                letter_string = ''.join(drawn_letters)
+                exchange_count = random.randint(1, 3)
+                test_input = f'{letter_string}{exchange_count}'
+                
+                # Run analysis to populate cache (suppress all output)
+                self._find_best_words_silent(test_input)
+                
+            except Exception:
+                # Skip combinations that cause issues
+                continue
+        
+        # Clear progress bar line and show completion
+        print('\r' + ' ' * 80 + '\r', end='', flush=True)
+        
+        final_cache_size = len(self.substitution_cache)
+        new_entries = final_cache_size - initial_cache_size
+        
+        if new_entries > 0:
+            print(f"Cache primed with {new_entries} realistic letter combination entries")
+    
+    def _find_best_words_silent(self, input_str: str) -> Dict:
+        """Silent version of find_best_words for cache priming - no progress output."""
+        try:
+            letters, exchanges_remaining, required_letters, target_length, positional_letters = self.parse_input(input_str)
+            
+            # Generate all possible words (silent)
+            valid_words = self.generate_word_combinations(letters, target_length=target_length, 
+                                                        required_letters=required_letters, 
+                                                        positional_letters=positional_letters)
+            
+            if not valid_words:
+                return {}
+            
+            # Score all words and get top 10 (silent)
+            scored_words = [(word, self.calculate_word_score(word)) for word in valid_words]
+            scored_words.sort(key=lambda x: x[1], reverse=True)
+            top_10 = scored_words[:10]
+            
+            # Get exchange suggestions (silent)
+            exchange_suggestions = self._find_exchange_opportunities_silent(letters, exchanges_remaining, required_letters, target_length, positional_letters)
+            
+            return {
+                'input': input_str,
+                'parsed_letters': letters,
+                'required_letters': required_letters,
+                'target_length': target_length,
+                'positional_letters': positional_letters,
+                'exchanges_remaining': exchanges_remaining,
+                'top_words': top_10,
+                'exchange_suggestions': exchange_suggestions,
+                'total_words_found': len(valid_words)
+            }
+        except Exception:
+            return {}
+    
+    def _find_exchange_opportunities_silent(self, letters: List[str], exchanges_remaining: int, required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None) -> List:
+        """Silent version of find_exchange_opportunities for cache priming."""
+        try:
+            if exchanges_remaining <= 0:
+                return []
+            
+            if required_letters is None:
+                required_letters = []
+            if positional_letters is None:
+                positional_letters = {}
+            
+            current_letters = letters.copy()
+            
+            # Get current words (silent)
+            current_words = self.generate_word_combinations(current_letters, target_length=target_length,
+                                                          required_letters=required_letters, 
+                                                          positional_letters=positional_letters)
+            
+            if not current_words:
+                return []
+            
+            # Analyze letter usage (silent)
+            letter_usage_analysis = self._analyze_letter_usage_in_words_silent(current_letters, current_words, required_letters, target_length, positional_letters)
+            
+            # Format results (silent)
+            suggestions = self._format_least_useful_letters(letter_usage_analysis, exchanges_remaining)
+            
+            return suggestions
+        except Exception:
+            return []
+    
+    def _analyze_letter_usage_in_words_silent(self, input_letters: List[str], found_words: Set[str], required_letters: List[str] = None, target_length: int = None, positional_letters: Dict[int, str] = None) -> Dict:
+        """Silent version of letter usage analysis for cache priming."""
+        try:
+            if required_letters is None:
+                required_letters = []
+            if positional_letters is None:
+                positional_letters = {}
+                
+            input_letter_counts = Counter(input_letters)
+            letter_analysis = {}
+            
+            # Get baseline stats
+            total_words = len(found_words)
+            if total_words == 0:
+                return {}
+            
+            total_score_potential = sum(self.calculate_word_score(word) for word in found_words)
+            
+            # Analyze each letter (silent - no progress bars)
+            unique_letters = [letter for letter in input_letter_counts.keys() if letter != '*']
+            
+            for letter in unique_letters:
+                try:
+                    analysis_result = self._analyze_single_letter(letter, input_letter_counts, input_letters,
+                                                                found_words, total_words, total_score_potential,
+                                                                required_letters, target_length, positional_letters)
+                    if analysis_result:
+                        letter_analysis[letter] = analysis_result
+                except Exception:
+                    continue
+            
+            return letter_analysis
+        except Exception:
+            return {}
     
     def _generate_random_exchange_scenario(self, current_letters: List[str], letter_pool: List[str], exchange_count: int) -> Tuple[str, List[str], List[str]] or None:
         """Generate a random exchange scenario."""
@@ -1014,14 +1350,17 @@ class WordatroCheater:
     
     def find_best_words(self, input_str: str) -> Dict:
         """Main function to find best words and suggestions."""
+        print(f"📝 Parsing input: {input_str}")
         letters, exchanges_remaining, required_letters, target_length, positional_letters = self.parse_input(input_str)
         
+        print("🔍 Generating word combinations...")
         # Generate all possible words (filtering for required letters, target length, and positional letters)
         valid_words = self.generate_word_combinations(letters, target_length=target_length, 
                                                     required_letters=required_letters, 
                                                     positional_letters=positional_letters)
         
         if not valid_words:
+            print("❌ No valid words found")
             return {
                 'input': input_str,
                 'parsed_letters': letters,
@@ -1035,13 +1374,18 @@ class WordatroCheater:
                 'message': 'No valid words found with current letters and constraints.'
             }
         
+        print(f"✓ Found {len(valid_words)} valid words")
+        print("📊 Calculating scores...")
+        
         # Score all words and get top 10
         scored_words = [(word, self.calculate_word_score(word)) for word in valid_words]
         scored_words.sort(key=lambda x: x[1], reverse=True)
         top_10 = scored_words[:10]
         
+        print("⚡ Analyzing exchange opportunities...")
         # Get exchange suggestions
         exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining, required_letters, target_length, positional_letters)
+        print("✓ Analysis complete!")
         
         return {
             'input': input_str,
@@ -1139,6 +1483,8 @@ def main():
             user_input = input("Enter letters and exchanges: ").strip()
             
             if user_input.lower() in ['quit', 'exit', 'q']:
+                print("Saving cache...")
+                cheater.save_cache()
                 print("Goodbye! 👋")
                 break
             
@@ -1155,7 +1501,9 @@ def main():
             cheater.print_results(results)
             
         except KeyboardInterrupt:
-            print("\nGoodbye! 👋")
+            print("\nSaving cache...")
+            cheater.save_cache()
+            print("Goodbye! 👋")
             break
         except Exception as e:
             print(f"❌ Error: {e}")

@@ -9,7 +9,9 @@ A powerful utility to find the highest-scoring words for word games like Wordatr
 - **Case Insensitive**: Handles both uppercase and lowercase input automatically
 - **Advanced Scoring System**: Implements the exact Wordatro scoring: (sum of letter scores) × word length
 - **Wildcard Support**: Handles `*` wildcards using pre-computed compatibility tables
-- **Realistic Exchange Simulation**: Simulates random letter exchanges (1-3 letters) like real game mechanics
+- **Weighted Exchange Analysis**: Uses Scrabble tile frequencies for realistic exchange probability calculations
+- **Duplicate Letter Analysis**: Detailed recommendations for removing multiple instances of the same letter
+- **Required/Positional Letters**: Support for uppercase required letters and positional constraints (.A.B format)
 - **Top 10 Results**: Returns the highest-scoring words with detailed score breakdowns
 - **Interactive CLI**: User-friendly command-line interface
 
@@ -40,9 +42,11 @@ python wordatro.py --help             # Show help information
 ### Input Format
 Enter letters followed by the number of exchanges available (case insensitive):
 - `ABCDEFGHI3` or `abcdefghi3` - 9 letters with 3 exchanges (maximum word length is 9)
-- `SCRABBLE2` or `scrabble2` - 8 letters with 2 exchanges  
+- `7SCRABBLE2` - Target 7-letter words from SCRABBLE with 2 exchanges
 - `QU*ZZ*XY1` or `qu*zz*xy1` - Letters with wildcards (*) and 1 exchange
 - `GAMEWORD0` or `gameword0` - No exchanges available
+- `AabcDef3` - Required letters (A, D uppercase) with optional letters (lowercase) and 3 exchanges
+- `.A.BCD3` - Positional letters (A at position 1, B at position 3) with 3 exchanges
 
 ### Example Session
 ```
@@ -67,14 +71,11 @@ Total valid words found: 15
  4. CABLES       | Score:   90 | (15 × 6)
  5. BRACE        | Score:   40 | (8 × 5)
 
-========================= EXCHANGE SUGGESTIONS =========================
-1. Exchange 1 letters: ['A'] → ['Q']
-   Potential improvement: +45 points
-   New letters: S C R Q B B L E
-
-2. Exchange 2 letters: ['A', 'E'] → ['X', 'Z']
-   Potential improvement: +89 points
-   New letters: S C R X B B L Z
+=============== LETTER ANALYSIS ===============
+Letters ranked by exchange potential (best candidates first):
+  1. A - removing loses 12.5%, exchange avg +42.3% (best: Q) (GOOD TRADE)
+  2. E - removing loses 8.7%, exchange avg +29.3% (best: S) (GOOD TRADE) | Remove: rm1:8.7%(GAIN:+4435 GOOD TRADE), rm2:44.2%(GAIN:+206719 GOOD TRADE)
+  3. R - removing loses 61.9%, exchange avg -41.7% (BAD TRADE)
 ```
 
 ## API Usage

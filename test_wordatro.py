@@ -51,7 +51,7 @@ def test_wordatro():
     print("\nInput parsing examples:")
     test_inputs = ["ABCDEFGHI3", "XYZ*123", "HELLO0", "TEST"]
     for inp in test_inputs:
-        letters, exchanges = cheater.parse_input(inp)
+        letters, exchanges, required, target_len, positional = cheater.parse_input(inp)
         print(f"{inp:<12} → Letters: {letters}, Exchanges: {exchanges}")
     
     print(f"\n{'='*60}")
