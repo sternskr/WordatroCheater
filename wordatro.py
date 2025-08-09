@@ -3,6 +3,9 @@ import itertools
 import pickle
 import os
 import sys
+import random
+import concurrent.futures
+from threading import Lock
 from collections import defaultdict, Counter
 from typing import List, Set, Tuple, Dict
 import re
@@ -154,22 +157,16 @@ class WordatroCheater:
     
     def _build_optimized_indexes(self):
         """Build optimized data structures for fast word lookups during runtime."""
-        print("Building optimized indexes...")
+        print("Building optimized indexes with multithreading...")
         
-        # Group words by length for efficient filtering
+        # Initialize data structures
         self.words_by_length = defaultdict(set)
-        
-        # Pre-compute letter patterns for fast word matching
-        self.words_by_pattern = defaultdict(set)  # letter counts -> words
-        self.anagram_groups = defaultdict(set)    # sorted letters -> words
-        
-        # Reverse lookup: which words contain each letter
+        self.words_by_pattern = defaultdict(set)
+        self.anagram_groups = defaultdict(set)
         self.words_containing_letter = defaultdict(set)
-        
-        # Pre-compute wildcard compatibility data
         self.wildcard_compatible = defaultdict(dict)
         
-        # Pre-compute exchange value improvements
+        # Pre-compute exchange value improvements (single-threaded, fast)
         self.exchange_values = {}
         for old_letter in self.letter_scores:
             for new_letter in self.letter_scores:
@@ -177,45 +174,103 @@ class WordatroCheater:
                     self.letter_scores[new_letter] - self.letter_scores[old_letter]
                 )
         
-        # Process each word in dictionary
-        for word in self.dictionary:
+        # Thread-safe locks for shared data structures
+        self._lock = Lock()
+        
+        # Split dictionary into chunks for parallel processing
+        words_list = list(self.dictionary)
+        chunk_size = max(1000, len(words_list) // (os.cpu_count() or 4))
+        word_chunks = [words_list[i:i + chunk_size] for i in range(0, len(words_list), chunk_size)]
+        
+        print(f"Processing {len(words_list)} words in {len(word_chunks)} chunks using {os.cpu_count() or 4} threads...")
+        
+        # Process chunks in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+            futures = [executor.submit(self._process_word_chunk, chunk) for chunk in word_chunks]
+            
+            # Wait for all chunks to complete
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Error processing word chunk: {e}")
+        
+        print(f"Indexes built: {len(self.dictionary)} words processed")
+    
+    def _process_word_chunk(self, words_chunk):
+        """Process a chunk of words in a separate thread."""
+        # Local data structures for this thread
+        local_words_by_length = defaultdict(set)
+        local_words_by_pattern = defaultdict(set)
+        local_anagram_groups = defaultdict(set)
+        local_words_containing_letter = defaultdict(set)
+        local_wildcard_compatible = defaultdict(dict)
+        
+        # Process each word in this chunk
+        for word in words_chunk:
             word_len = len(word)
             letter_counts = Counter(word)
             sorted_letters = ''.join(sorted(word))
             
             # Basic indexing
-            self.words_by_length[word_len].add(word)
+            local_words_by_length[word_len].add(word)
             
             # Pattern-based indexing for fast letter matching
             pattern = tuple(sorted(letter_counts.items()))
-            self.words_by_pattern[pattern].add(word)
+            local_words_by_pattern[pattern].add(word)
             
             # Anagram grouping
-            self.anagram_groups[sorted_letters].add(word)
+            local_anagram_groups[sorted_letters].add(word)
             
             # Letter containment indexing
             for letter in set(word):
-                self.words_containing_letter[letter].add(word)
+                local_words_containing_letter[letter].add(word)
             
             # Wildcard compatibility pre-computation
             for wildcards_needed in range(1, 4):  # Support 1-3 wildcards
-                self._index_wildcard_compatibility(word, letter_counts, wildcards_needed)
+                self._index_wildcard_compatibility_local(word, letter_counts, wildcards_needed, local_wildcard_compatible)
         
-        print(f"Indexes built: {len(self.dictionary)} words processed")
+        # Merge local results into global data structures (thread-safe)
+        with self._lock:
+            self._merge_local_indexes(local_words_by_length, local_words_by_pattern, 
+                                    local_anagram_groups, local_words_containing_letter, 
+                                    local_wildcard_compatible)
     
-    def _index_wildcard_compatibility(self, word, letter_counts, wildcards_needed):
-        """Pre-compute which letter sets can form this word with wildcards."""
+    def _merge_local_indexes(self, local_words_by_length, local_words_by_pattern, 
+                           local_anagram_groups, local_words_containing_letter, 
+                           local_wildcard_compatible):
+        """Merge local thread results into global indexes."""
+        
+        # Merge words_by_length
+        for length, words in local_words_by_length.items():
+            self.words_by_length[length].update(words)
+        
+        # Merge words_by_pattern
+        for pattern, words in local_words_by_pattern.items():
+            self.words_by_pattern[pattern].update(words)
+        
+        # Merge anagram_groups
+        for sorted_letters, words in local_anagram_groups.items():
+            self.anagram_groups[sorted_letters].update(words)
+        
+        # Merge words_containing_letter
+        for letter, words in local_words_containing_letter.items():
+            self.words_containing_letter[letter].update(words)
+        
+        # Merge wildcard_compatible
+        for wildcards_needed, patterns in local_wildcard_compatible.items():
+            for pattern, words in patterns.items():
+                if pattern not in self.wildcard_compatible[wildcards_needed]:
+                    self.wildcard_compatible[wildcards_needed][pattern] = set()
+                self.wildcard_compatible[wildcards_needed][pattern].update(words)
+    
+    def _index_wildcard_compatibility_local(self, word, letter_counts, wildcards_needed, local_wildcard_compatible):
+        """Local version of wildcard compatibility indexing for thread safety."""
         word_len = len(word)
         unique_letters = set(word)
         
-        # For each possible combination of available letters that could form this word
-        # We'll store patterns that need exactly 'wildcards_needed' wildcards
-        
-        # Generate subsets of the word's letters that would need wildcards to complete
         from itertools import combinations
         
-        # If word has 'n' unique letters and we have 'wildcards_needed' wildcards,
-        # we need at least (n - wildcards_needed) real letters from the word
         min_real_letters = max(0, len(unique_letters) - wildcards_needed)
         max_real_letters = len(unique_letters)
         
@@ -224,23 +279,23 @@ class WordatroCheater:
                 continue
                 
             for letter_subset in combinations(unique_letters, real_letter_count):
-                # Create a pattern for this subset
                 partial_counts = {}
                 wildcards_used = 0
                 
                 for letter in letter_subset:
                     partial_counts[letter] = letter_counts[letter]
                 
-                # Calculate how many wildcards we'd need for the missing letters
                 for letter in unique_letters:
                     if letter not in letter_subset:
                         wildcards_used += letter_counts[letter]
                 
                 if wildcards_used == wildcards_needed:
                     pattern = tuple(sorted(partial_counts.items()))
-                    if pattern not in self.wildcard_compatible[wildcards_needed]:
-                        self.wildcard_compatible[wildcards_needed][pattern] = set()
-                    self.wildcard_compatible[wildcards_needed][pattern].add(word)
+                    if pattern not in local_wildcard_compatible[wildcards_needed]:
+                        local_wildcard_compatible[wildcards_needed][pattern] = set()
+                    local_wildcard_compatible[wildcards_needed][pattern].add(word)
+    
+
     
     def calculate_word_score(self, word: str) -> int:
         """Calculate score for a word: (sum of letter scores) * word length."""
@@ -263,21 +318,35 @@ class WordatroCheater:
         return letters, exchanges
     
     def generate_word_combinations(self, letters: List[str], target_length: int = None) -> Set[str]:
-        """Generate all possible word combinations from given letters."""
-        valid_words = set()
+        """Generate all possible word combinations from given letters using parallel processing."""
         letter_counts = Counter(letters)
         
         # If no target length specified, try all lengths up to 9 letters (Wordatro max)
         max_length = min(len(letters), 9)  # Wordatro maximum is 9 letters
         lengths_to_try = [target_length] if target_length else range(3, max_length + 1)
         
-        for length in lengths_to_try:
-            if length > max_length:
-                continue
+        if len(lengths_to_try) == 1:
+            # Single length - no need for threading
+            return self._find_words_of_length(letters, lengths_to_try[0])
+        
+        # Multiple lengths - use parallel processing
+        valid_words = set()
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(lengths_to_try), os.cpu_count())) as executor:
+            # Submit tasks for each length
+            future_to_length = {
+                executor.submit(self._find_words_of_length, letters, length): length 
+                for length in lengths_to_try if length <= max_length
+            }
             
-            # Use combinations instead of permutations for better performance
-            # Then check if we can form words from available letters
-            valid_words.update(self._find_words_of_length(letters, length))
+            # Collect results
+            for future in concurrent.futures.as_completed(future_to_length):
+                try:
+                    words_for_length = future.result()
+                    valid_words.update(words_for_length)
+                except Exception as e:
+                    length = future_to_length[future]
+                    print(f"Error processing length {length}: {e}")
         
         return valid_words
     
@@ -374,95 +443,112 @@ class WordatroCheater:
 
     
     def find_exchange_opportunities(self, letters: List[str], exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
-        """Find potential letter exchanges using pre-computed exchange values."""
+        """Find potential letter exchanges by simulating random exchanges."""
         if exchanges_remaining <= 0:
             return []
         
-        suggestions = []
         current_letters = letters.copy()
         
-        # Get current best score (limit to reasonable performance)
+        # Get current best score
         current_words = self.generate_word_combinations(current_letters)
         current_best_score = max([self.calculate_word_score(w) for w in current_words], default=0)
         
-        # Use pre-computed exchange values to quickly identify promising swaps
-        exchange_candidates = []
+        suggestions = []
         
-        for i, old_letter in enumerate(current_letters):
-            if old_letter == '*':  # Don't exchange wildcards
-                continue
-                
-            # Find the most valuable exchanges for this letter
-            best_exchanges = []
-            for new_letter in self.letter_scores:
-                if new_letter != old_letter:
-                    value_improvement = self.exchange_values.get((old_letter, new_letter), 0)
-                    if value_improvement > 0:  # Only consider improvements
-                        best_exchanges.append((new_letter, value_improvement, i))
+        # Create a realistic letter distribution for random exchanges
+        # Based on common English letter frequency
+        letter_pool = [
+            'E', 'E', 'E', 'E', 'E', 'E',  # Most common
+            'A', 'A', 'A', 'A', 'A',
+            'R', 'R', 'R', 'R', 'I', 'I', 'I', 'I',
+            'O', 'O', 'O', 'O', 'T', 'T', 'T', 'T',
+            'N', 'N', 'N', 'S', 'S', 'S', 'L', 'L', 'L',
+            'C', 'C', 'U', 'U', 'D', 'D', 'P', 'P',
+            'M', 'M', 'H', 'H', 'G', 'G', 'B', 'B',
+            'F', 'F', 'Y', 'Y', 'W', 'W', 'K', 'V',
+            'X', 'Z', 'J', 'Q'  # Rare letters
+        ]
+        
+        # Test multiple random exchange scenarios in parallel
+        exchange_scenarios = []
+        
+        for exchange_count in range(1, min(4, exchanges_remaining + 1)):
+            # Generate multiple random scenarios for this exchange count
+            for _ in range(20):  # Test 20 random scenarios per exchange count
+                scenario = self._generate_random_exchange_scenario(current_letters, letter_pool, exchange_count)
+                if scenario:
+                    exchange_scenarios.append(scenario)
+        
+        # Test scenarios in parallel
+        promising_exchanges = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count())) as executor:
+            future_to_scenario = {
+                executor.submit(self._test_exchange_scenario, scenario, current_best_score): scenario 
+                for scenario in exchange_scenarios
+            }
             
-            # Sort by value improvement and take top candidates
-            best_exchanges.sort(key=lambda x: x[1], reverse=True)
-            exchange_candidates.extend(best_exchanges[:3])  # Top 3 per letter
+            for future in concurrent.futures.as_completed(future_to_scenario):
+                try:
+                    result = future.result()
+                    if result:
+                        promising_exchanges.append(result)
+                except Exception as e:
+                    continue  # Skip failed scenarios
         
-        # Sort all candidates by improvement potential
-        exchange_candidates.sort(key=lambda x: x[1], reverse=True)
+        # Sort by improvement and return top suggestions
+        promising_exchanges.sort(key=lambda x: x[1], reverse=True)
+        return promising_exchanges[:3]
+    
+    def _generate_random_exchange_scenario(self, current_letters: List[str], letter_pool: List[str], exchange_count: int) -> Tuple[str, List[str], List[str]] or None:
+        """Generate a random exchange scenario."""
+        if exchange_count > len(current_letters):
+            return None
         
-        # Try the most promising single exchanges first
-        max_single_tests = min(10, len(exchange_candidates))
+        # Don't exchange wildcards
+        exchangeable_positions = [i for i, letter in enumerate(current_letters) if letter != '*']
+        if len(exchangeable_positions) < exchange_count:
+            return None
         
-        for new_letter, value_improvement, position in exchange_candidates[:max_single_tests]:
-            # Quick filter: only test if potential improvement is significant
-            estimated_improvement = value_improvement * 6  # Conservative estimate for word length
-            if estimated_improvement < 5:
-                continue
-                
-            test_letters = current_letters.copy()
-            test_letters[position] = new_letter
-            
+        # Randomly select positions to exchange
+        positions_to_exchange = random.sample(exchangeable_positions, exchange_count)
+        
+        # Get random replacement letters
+        new_letters = random.sample(letter_pool, exchange_count)
+        
+        # Create the test letter set
+        test_letters = current_letters.copy()
+        old_letters = []
+        
+        for i, pos in enumerate(positions_to_exchange):
+            old_letters.append(current_letters[pos])
+            test_letters[pos] = new_letters[i]
+        
+        description = f"Exchange {exchange_count} letters: {old_letters} → {new_letters}"
+        return (description, test_letters, old_letters)
+    
+    def _test_exchange_scenario(self, scenario: Tuple[str, List[str], List[str]], current_best_score: int) -> Tuple[str, int, List[str]] or None:
+        """Test a single exchange scenario."""
+        description, test_letters, old_letters = scenario
+        
+        try:
+            # Generate words with new letter combination
             test_words = self.generate_word_combinations(test_letters)
-            if test_words:
-                best_test_score = max([self.calculate_word_score(w) for w in test_words])
-                
-                if best_test_score > current_best_score:
-                    suggestions.append((
-                        f"Exchange 1 letter: [{current_letters[position]}] → [{new_letter}]",
-                        best_test_score - current_best_score,
-                        test_letters
-                    ))
+            if not test_words:
+                return None
+            
+            # Calculate best score
+            best_test_score = max([self.calculate_word_score(w) for w in test_words])
+            
+            # Only return if it's an improvement
+            if best_test_score > current_best_score:
+                improvement = best_test_score - current_best_score
+                return (description, improvement, test_letters)
+            
+        except Exception:
+            pass
         
-        # Try 2-letter exchanges if we have exchanges remaining and promising candidates
-        if exchanges_remaining >= 2 and len(exchange_candidates) >= 2:
-            # Test top 2-letter combinations
-            for i in range(min(3, len(exchange_candidates))):
-                for j in range(i + 1, min(5, len(exchange_candidates))):
-                    if exchange_candidates[i][2] != exchange_candidates[j][2]:  # Different positions
-                        test_letters = current_letters.copy()
-                        test_letters[exchange_candidates[i][2]] = exchange_candidates[i][0]
-                        test_letters[exchange_candidates[j][2]] = exchange_candidates[j][0]
-                        
-                        # Quick value check
-                        combined_improvement = exchange_candidates[i][1] + exchange_candidates[j][1]
-                        if combined_improvement * 6 < 15:  # Skip if not promising enough
-                            continue
-                        
-                        test_words = self.generate_word_combinations(test_letters)
-                        if test_words:
-                            best_test_score = max([self.calculate_word_score(w) for w in test_words])
-                            
-                            if best_test_score > current_best_score:
-                                old_letters = [current_letters[exchange_candidates[i][2]], 
-                                             current_letters[exchange_candidates[j][2]]]
-                                new_letters = [exchange_candidates[i][0], exchange_candidates[j][0]]
-                                
-                                suggestions.append((
-                                    f"Exchange 2 letters: {old_letters} → {new_letters}",
-                                    best_test_score - current_best_score,
-                                    test_letters
-                                ))
-        
-        # Sort by score improvement and return top suggestions
-        suggestions.sort(key=lambda x: x[1], reverse=True)
-        return suggestions[:3]
+        return None
     
     def find_best_words(self, input_str: str) -> Dict:
         """Main function to find best words and suggestions."""
@@ -486,15 +572,12 @@ class WordatroCheater:
         scored_words.sort(key=lambda x: x[1], reverse=True)
         top_10 = scored_words[:10]
         
-        # Get exchange suggestions
-        exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining)
         
         return {
             'input': input_str,
             'parsed_letters': letters,
             'exchanges_remaining': exchanges_remaining,
             'top_words': top_10,
-            'exchange_suggestions': exchange_suggestions,
             'total_words_found': len(valid_words)
         }
     
@@ -515,14 +598,6 @@ class WordatroCheater:
                 print(f"{i:2d}. {word:<12} | Score: {score:4d} | ({letter_score} × {len(word)})")
         else:
             print("No valid words found.")
-        
-        if results['exchange_suggestions']:
-            print(f"\n{'='*25} EXCHANGE SUGGESTIONS {'='*25}")
-            for i, (suggestion, improvement, new_letters) in enumerate(results['exchange_suggestions'], 1):
-                print(f"{i}. {suggestion}")
-                print(f"   Potential improvement: +{improvement} points")
-                print(f"   New letters: {' '.join(new_letters)}")
-                print()
 
 def main():
     """Main function to run the WordatroCheater utility."""

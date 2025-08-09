@@ -9,7 +9,7 @@ A powerful utility to find the highest-scoring words for word games like Wordatr
 - **Case Insensitive**: Handles both uppercase and lowercase input automatically
 - **Advanced Scoring System**: Implements the exact Wordatro scoring: (sum of letter scores) × word length
 - **Wildcard Support**: Handles `*` wildcards using pre-computed compatibility tables
-- **Letter Exchange Optimization**: Suggests strategic letter swaps to maximize scoring potential
+- **Realistic Exchange Simulation**: Simulates random letter exchanges (1-3 letters) like real game mechanics
 - **Top 10 Results**: Returns the highest-scoring words with detailed score breakdowns
 - **Interactive CLI**: User-friendly command-line interface
 
@@ -144,17 +144,20 @@ WORDGAMES
 ## Performance Features
 
 - **Smart Caching**: Dictionary processed once, cached as `dictionary.word` for instant loading
+- **Multithreaded Processing**: Uses all CPU cores for dictionary indexing and word generation
+- **Parallel Exchange Testing**: Tests multiple exchange scenarios simultaneously
 - **Set-based Dictionary**: O(1) word lookup time
 - **Pre-computed Indexes**: Letter patterns, anagram groups, and wildcard compatibility tables
-- **Optimized Exchange Logic**: Pre-calculated letter value improvements
+- **Concurrent Word Generation**: Parallel processing for different word lengths
 - **Automatic Cache Management**: Detects when source dictionary is updated and rebuilds cache
 
 ## Tips for Best Results
 
 1. **Use High-Value Letters**: Q, X, Z, J provide the highest scores
 2. **Maximize Word Length**: Longer words get higher multipliers
-3. **Strategic Exchanges**: Replace common letters (A, E, I) with rare ones
+3. **Smart Exchanges**: The utility simulates realistic random exchanges - try suggested swaps
 4. **Wildcard Placement**: Use wildcards for high-value letter positions
+5. **Multiple Attempts**: Exchange suggestions are based on random sampling - run multiple times for different options
 
 ## Requirements
 
