@@ -83,6 +83,10 @@ class WordatroCheater:
             self.words_containing_letter = defaultdict(set, data['words_containing_letter'])
             self.wildcard_compatible = defaultdict(dict, data['wildcard_compatible'])
             self.exchange_values = data['exchange_values']
+            # Load substitution cache if available (optional for backward compatibility)
+            self.substitution_cache = data.get('substitution_cache', {})
+            # Set cache limit (not saved in cache file to allow runtime adjustment)
+            self.substitution_cache_limit = 10000
             
             return True
             
@@ -100,7 +104,8 @@ class WordatroCheater:
                 'anagram_groups': dict(self.anagram_groups),
                 'words_containing_letter': dict(self.words_containing_letter),
                 'wildcard_compatible': dict(self.wildcard_compatible),
-                'exchange_values': dict(self.exchange_values)
+                'exchange_values': dict(self.exchange_values),
+                'substitution_cache': self.substitution_cache
             }
             
             with open(self.cache_file, 'wb') as f:
@@ -173,6 +178,11 @@ class WordatroCheater:
                 self.exchange_values[(old_letter, new_letter)] = (
                     self.letter_scores[new_letter] - self.letter_scores[old_letter]
                 )
+        
+        # Cache for letter substitution results to avoid redundant calculations
+        # Use ordered dict for LRU behavior with size limit
+        self.substitution_cache = {}
+        self.substitution_cache_limit = 10000  # ~1MB memory, covers 500+ analyses
         
         # Thread-safe locks for shared data structures
         self._lock = Lock()
@@ -597,106 +607,141 @@ class WordatroCheater:
         
         total_score_potential = sum(self.calculate_word_score(word) for word in found_words)
         
-        for letter in input_letter_counts:
-            if letter == '*':  # Skip wildcards
-                continue
+        # Parallelize letter analysis for better performance
+        unique_letters = [letter for letter in input_letter_counts.keys() if letter != '*']
+        
+        if not unique_letters:
+            return letter_analysis
+        
+        # Use thread pool to analyze letters in parallel
+        max_workers = min(len(unique_letters), 4)  # Limit to avoid too much overhead
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit analysis tasks for each letter
+            future_to_letter = {}
+            for letter in unique_letters:
+                future = executor.submit(self._analyze_single_letter, 
+                                       letter, input_letter_counts, input_letters,
+                                       found_words, total_words, total_score_potential,
+                                       required_letters, target_length, positional_letters)
+                future_to_letter[future] = letter
             
-            available_count = input_letter_counts[letter]
-            
-            # Calculate duplicate analysis first
-            words_using_letter = sum(1 for word in found_words if letter in word.upper())
-            max_usage_in_word = max((Counter(word.upper())[letter] for word in found_words if letter in word.upper()), default=0)
-            
-            # Determine how many of this letter are actually excess
-            # If we have 3 A's but no word uses more than 1 A, then 2 A's are excess
-            truly_excess = max(0, available_count - max_usage_in_word)
-            
-            # Test impact of removing letters, starting with excess ones
-            if truly_excess > 0:
-                # Test removing different numbers of this letter to find the safe removal count
-                removal_impacts = {}
-                
-                for num_to_remove in range(1, min(truly_excess + 2, available_count + 1)):  # Test removing 1 to all excess + 1 more
-                    test_letters = input_letters.copy()
-                    
-                    # Remove the specified number of instances
-                    removed_count = 0
-                    for _ in range(num_to_remove):
-                        if letter in test_letters:
-                            test_letters.remove(letter)
-                            removed_count += 1
-                        else:
-                            break
-                    
-                    if removed_count > 0:
-                        remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, required_letters=required_letters, positional_letters=positional_letters)
-                        remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
-                        
-                        words_lost = total_words - len(remaining_words)
-                        score_lost = total_score_potential - remaining_score_potential
-                        
-                        removal_impacts[removed_count] = {
-                            'words_lost': words_lost,
-                            'score_lost': score_lost,
-                            'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0
-                        }
-                
-                # Use the impact of removing 1 letter for the main removability score
-                if 1 in removal_impacts:
-                    words_lost = removal_impacts[1]['words_lost']
-                    score_lost = removal_impacts[1]['score_lost']
-                    removability_score = score_lost
-                else:
-                    words_lost = 0
-                    score_lost = 0
-                    removability_score = 0
-                
-                # Calculate exchange potential by substituting with wildcard
-                exchange_potential = self._calculate_exchange_potential(input_letters, letter, 
-                                                                      required_letters, target_length, 
-                                                                      positional_letters, total_score_potential)
-                
-            else:
-                # No excess letters - removing any will be destructive
-                test_letters = input_letters.copy()
-                test_letters.remove(letter)
-                
-                remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, required_letters=required_letters, positional_letters=positional_letters)
-                remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
-                
-                words_lost = total_words - len(remaining_words)
-                score_lost = total_score_potential - remaining_score_potential
-                
-                # All letters of this type are needed, so impact is high
-                removability_score = score_lost
-                removal_impacts = {}  # No removal impacts to show since no excess
-                
-                # Calculate exchange potential by substituting with wildcard
-                exchange_potential = self._calculate_exchange_potential(input_letters, letter, 
-                                                                      required_letters, target_length, 
-                                                                      positional_letters, total_score_potential)
-            
-            # Build the analysis record
-            letter_analysis[letter] = {
-                'available_count': available_count,
-                'words_using_letter': words_using_letter,
-                'words_lost_if_removed': words_lost,
-                'score_lost_if_removed': score_lost,
-                'max_usage_in_word': max_usage_in_word,
-                'excess_letters': truly_excess,
-                'removability_score': removability_score,
-                'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0,
-                'is_excess_available': truly_excess > 0,
-                'removal_impacts': removal_impacts if truly_excess > 0 else {},
-                'exchange_potential': exchange_potential
-            }
+            # Collect results
+            for future in concurrent.futures.as_completed(future_to_letter):
+                letter = future_to_letter[future]
+                try:
+                    analysis_result = future.result()
+                    if analysis_result:
+                        letter_analysis[letter] = analysis_result
+                except Exception as e:
+                    # Log error but continue with other letters
+                    print(f"Error analyzing letter {letter}: {e}")
         
         return letter_analysis
+    
+    def _analyze_single_letter(self, letter: str, input_letter_counts: Counter, input_letters: List[str],
+                             found_words: Set[str], total_words: int, total_score_potential: int,
+                             required_letters: List[str], target_length: int, positional_letters: Dict[int, str]) -> Dict:
+        """Analyze a single letter for exchange potential and removal impact."""
+        available_count = input_letter_counts[letter]
+        
+        # Calculate duplicate analysis first
+        words_using_letter = sum(1 for word in found_words if letter in word.upper())
+        max_usage_in_word = max((Counter(word.upper())[letter] for word in found_words if letter in word.upper()), default=0)
+        
+        # Determine how many of this letter are actually excess
+        truly_excess = max(0, available_count - max_usage_in_word)
+        
+        # Test impact of removing letters, starting with excess ones
+        if truly_excess > 0:
+            # Test removing different numbers of this letter to find the safe removal count
+            removal_impacts = {}
+            
+            for num_to_remove in range(1, min(truly_excess + 2, available_count + 1)):
+                test_letters = input_letters.copy()
+                
+                # Remove the specified number of instances
+                removed_count = 0
+                for _ in range(num_to_remove):
+                    if letter in test_letters:
+                        test_letters.remove(letter)
+                        removed_count += 1
+                    else:
+                        break
+                
+                if removed_count > 0:
+                    remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, 
+                                                                    required_letters=required_letters, positional_letters=positional_letters)
+                    remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
+                    
+                    words_lost = total_words - len(remaining_words)
+                    score_lost = total_score_potential - remaining_score_potential
+                    
+                    removal_impacts[removed_count] = {
+                        'words_lost': words_lost,
+                        'score_lost': score_lost,
+                        'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0
+                    }
+            
+            # Use the impact of removing 1 letter for the main removability score
+            if 1 in removal_impacts:
+                words_lost = removal_impacts[1]['words_lost']
+                score_lost = removal_impacts[1]['score_lost']
+                removability_score = score_lost
+            else:
+                words_lost = 0
+                score_lost = 0
+                removability_score = 0
+        else:
+            # No excess letters - removing any will be destructive
+            test_letters = input_letters.copy()
+            test_letters.remove(letter)
+            
+            remaining_words = self.generate_word_combinations(test_letters, target_length=target_length, 
+                                                            required_letters=required_letters, positional_letters=positional_letters)
+            remaining_score_potential = sum(self.calculate_word_score(word) for word in remaining_words) if remaining_words else 0
+            
+            words_lost = total_words - len(remaining_words)
+            score_lost = total_score_potential - remaining_score_potential
+            
+            # All letters of this type are needed, so impact is high
+            removability_score = score_lost
+            removal_impacts = {}  # No removal impacts to show since no excess
+        
+        # Calculate exchange potential by substituting with wildcard
+        exchange_potential = self._calculate_exchange_potential(input_letters, letter, 
+                                                              required_letters, target_length, 
+                                                              positional_letters, total_score_potential)
+        
+        # Build the analysis record
+        return {
+            'available_count': available_count,
+            'words_using_letter': words_using_letter,
+            'words_lost_if_removed': words_lost,
+            'score_lost_if_removed': score_lost,
+            'max_usage_in_word': max_usage_in_word,
+            'excess_letters': truly_excess,
+            'removability_score': removability_score,
+            'destruction_percentage': (score_lost / total_score_potential * 100) if total_score_potential > 0 else 0,
+            'is_excess_available': truly_excess > 0,
+            'removal_impacts': removal_impacts if truly_excess > 0 else {},
+            'exchange_potential': exchange_potential
+        }
     
     def _calculate_exchange_potential(self, input_letters: List[str], target_letter: str, 
                                     required_letters: List[str], target_length: int, 
                                     positional_letters: Dict[int, str], baseline_score: int) -> Dict:
         """Calculate the average score potential if we exchange target_letter for each possible letter."""
+        
+        # Quick optimization: if baseline score is 0, any exchange has potential
+        if baseline_score == 0:
+            return {
+                'average_score_potential': 0,
+                'best_substitute': None,
+                'best_substitute_score': 0,
+                'exchange_gain': 0,
+                'exchange_percentage_gain': 0
+            }
         
         # Create test letters with wildcard substitution
         test_letters = input_letters.copy()
@@ -715,42 +760,56 @@ class WordatroCheater:
                 'exchange_percentage_gain': 0
             }
         
-        # Test all 26 letters as substitutions
+        # Test all 26 letters as substitutions in parallel
         alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        
+        # Filter alphabet based on constraints
+        valid_substitutes = []
+        for substitute_letter in alphabet:
+            # Skip if this would violate required letter constraints
+            if target_letter in required_letters and substitute_letter not in required_letters:
+                continue
+            valid_substitutes.append(substitute_letter)
+        
+        if not valid_substitutes:
+            return {
+                'average_score_potential': 0,
+                'best_substitute': None,
+                'best_substitute_score': 0,
+                'exchange_gain': 0,
+                'exchange_percentage_gain': 0
+            }
+        
+        # Use parallel processing for substitution testing
         substitute_scores = []
         best_substitute = None
         best_score = 0
         
-        for substitute_letter in alphabet:
-            # Skip if this would violate required letter constraints
-            # (i.e., if we're removing a required letter, the substitute must also be required)
-            if target_letter in required_letters and substitute_letter not in required_letters:
-                continue
-                
-            # Create test scenario with this substitute
-            substitute_test_letters = test_letters.copy()
-            substitute_test_letters[substitute_test_letters.index('*')] = substitute_letter
+        # Create thread pool for parallel substitution testing
+        max_workers = min(len(valid_substitutes), 8)  # Limit threads to avoid overhead
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all substitution tests
+            future_to_letter = {}
+            for substitute_letter in valid_substitutes:
+                future = executor.submit(self._test_single_substitution, 
+                                       test_letters, substitute_letter, 
+                                       target_length, required_letters, positional_letters)
+                future_to_letter[future] = substitute_letter
             
-            try:
-                # Generate words with this substitution
-                substitute_words = self.generate_word_combinations(substitute_test_letters, 
-                                                                 target_length=target_length,
-                                                                 required_letters=required_letters, 
-                                                                 positional_letters=positional_letters)
-                
-                if substitute_words:
-                    substitute_score = sum(self.calculate_word_score(word) for word in substitute_words)
+            # Collect results
+            for future in concurrent.futures.as_completed(future_to_letter):
+                substitute_letter = future_to_letter[future]
+                try:
+                    substitute_score = future.result()
                     substitute_scores.append(substitute_score)
                     
                     if substitute_score > best_score:
                         best_score = substitute_score
                         best_substitute = substitute_letter
-                else:
+                        
+                except Exception:
                     substitute_scores.append(0)
-                    
-            except Exception:
-                # If generation fails, treat as 0 score
-                substitute_scores.append(0)
         
         # Calculate average potential
         if substitute_scores:
@@ -769,6 +828,64 @@ class WordatroCheater:
             'exchange_gain': exchange_gain,
             'exchange_percentage_gain': exchange_percentage_gain,
             'tested_substitutes': len(substitute_scores)
+        }
+    
+    def _test_single_substitution(self, test_letters: List[str], substitute_letter: str,
+                                target_length: int, required_letters: List[str], 
+                                positional_letters: Dict[int, str]) -> int:
+        """Test a single letter substitution and return the total score."""
+        try:
+            # Create cache key for this substitution scenario
+            cache_key = (
+                tuple(sorted(test_letters)), substitute_letter, 
+                target_length, tuple(sorted(required_letters)), 
+                tuple(sorted(positional_letters.items())) if positional_letters else ()
+            )
+            
+            # Check cache first
+            if cache_key in self.substitution_cache:
+                return self.substitution_cache[cache_key]
+            
+            # Create test scenario with this substitute
+            substitute_test_letters = test_letters.copy()
+            substitute_test_letters[substitute_test_letters.index('*')] = substitute_letter
+            
+            # Generate words with this substitution
+            substitute_words = self.generate_word_combinations(substitute_test_letters, 
+                                                             target_length=target_length,
+                                                             required_letters=required_letters, 
+                                                             positional_letters=positional_letters)
+            
+            if substitute_words:
+                result = sum(self.calculate_word_score(word) for word in substitute_words)
+            else:
+                result = 0
+            
+            # Cache the result with LRU management
+            self._add_to_cache(cache_key, result)
+            return result
+                
+        except Exception:
+            return 0
+    
+    def _add_to_cache(self, cache_key, result):
+        """Add entry to substitution cache with LRU eviction if needed."""
+        # If cache is full, remove oldest entries (simple FIFO for now)
+        if len(self.substitution_cache) >= self.substitution_cache_limit:
+            # Remove oldest 10% of entries to avoid frequent cleanup
+            entries_to_remove = max(1, len(self.substitution_cache) // 10)
+            oldest_keys = list(self.substitution_cache.keys())[:entries_to_remove]
+            for old_key in oldest_keys:
+                del self.substitution_cache[old_key]
+        
+        self.substitution_cache[cache_key] = result
+    
+    def _get_cache_info(self):
+        """Get cache statistics for debugging."""
+        return {
+            'size': len(self.substitution_cache),
+            'limit': self.substitution_cache_limit,
+            'utilization': len(self.substitution_cache) / self.substitution_cache_limit * 100
         }
     
     def _format_least_useful_letters(self, letter_analysis: Dict, exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
