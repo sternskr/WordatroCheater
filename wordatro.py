@@ -48,8 +48,8 @@ class WordatroCheater:
             if self._load_cached_data():
                 print(f"Loaded {len(self.dictionary)} words from cache")
                 # Prime the substitution cache with common letter patterns if it's relatively empty
-                if len(self.substitution_cache) < 250:  # Less than 2.5% full
-                    self._prime_substitution_cache(target_fullness=0.025)  # Prime to 2.5%
+                if len(self.substitution_cache) < 500:  # Less than 5% full
+                    self._prime_substitution_cache(target_fullness=0.05)  # Prime to 5%
                 return
             else:
                 print("⚠ Cache load failed, rebuilding...")
@@ -63,7 +63,7 @@ class WordatroCheater:
         print(f"Dictionary cached to {self.cache_file}")
         
         # Prime the substitution cache with common letter patterns
-        self._prime_substitution_cache(target_fullness=0.025)  # Prime to 2.5% for fresh builds
+        self._prime_substitution_cache(target_fullness=0.05)  # Prime to 5% for fresh builds
     
     def _should_use_cache(self) -> bool:
         """Check if cached data exists and is newer than source dictionary."""
@@ -641,45 +641,35 @@ class WordatroCheater:
         if not unique_letters:
             return letter_analysis
         
-        # Use thread pool to analyze letters in parallel
-        max_workers = min(len(unique_letters), self._get_safe_worker_count())  # Safe core count
+        # Process letters sequentially (threading overhead not worth it for this workload)
+        completed = 0
+        total_letters = len(unique_letters)
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit analysis tasks for each letter
-            future_to_letter = {}
-            for letter in unique_letters:
-                future = executor.submit(self._analyze_single_letter, 
-                                       letter, input_letter_counts, input_letters,
-                                       found_words, total_words, total_score_potential,
-                                       required_letters, target_length, positional_letters)
-                future_to_letter[future] = letter
-            
-            # Collect results with progress bar
-            completed = 0
-            total_letters = len(unique_letters)
-            
-            for future in concurrent.futures.as_completed(future_to_letter):
-                letter = future_to_letter[future]
-                try:
-                    analysis_result = future.result()
-                    if analysis_result:
-                        letter_analysis[letter] = analysis_result
-                    
-                    # Update progress
-                    completed += 1
-                    progress = completed / total_letters
-                    bar_length = 20
-                    filled_length = int(bar_length * progress)
-                    bar = '█' * filled_length + '░' * (bar_length - filled_length)
-                    print(f'\r  [{bar}] {progress:.0%} Analyzing letter {letter} ({completed}/{total_letters})', end='', flush=True)
-                    
-                except Exception as e:
-                    # Log error but continue with other letters
-                    completed += 1
-                    print(f"\rError analyzing letter {letter}: {e}")
-            
-            # Clear progress bar
-            print('\r' + ' ' * 70 + '\r', end='', flush=True)
+        for letter in unique_letters:
+            try:
+                analysis_result = self._analyze_single_letter(
+                    letter, input_letter_counts, input_letters,
+                    found_words, total_words, total_score_potential,
+                    required_letters, target_length, positional_letters)
+                
+                if analysis_result:
+                    letter_analysis[letter] = analysis_result
+                
+                # Update progress
+                completed += 1
+                progress = completed / total_letters
+                bar_length = 20
+                filled_length = int(bar_length * progress)
+                bar = '█' * filled_length + '░' * (bar_length - filled_length)
+                print(f'\r  [{bar}] {progress:.0%} Analyzing letter {letter} ({completed}/{total_letters})', end='', flush=True)
+                
+            except Exception as e:
+                # Log error but continue with other letters
+                completed += 1
+                print(f"\rError analyzing letter {letter}: {e}")
+        
+        # Clear progress bar
+        print('\r' + ' ' * 70 + '\r', end='', flush=True)
         
         return letter_analysis
     
@@ -855,7 +845,7 @@ class WordatroCheater:
                 'exchange_percentage_gain': 0
             }
         
-        # Test all 26 letters as substitutions in parallel
+        # Test all 26 letters as substitutions
         alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
         
         # Filter alphabet based on constraints
@@ -906,13 +896,14 @@ class WordatroCheater:
                 except Exception:
                     substitute_results.append((substitute_letter, 0))
         
-        # Calculate weighted average potential based on tile frequencies
+        # Calculate weighted average potential based on full tile bag frequencies
+        # (Exchange assumes letters are returned to bag before drawing new ones)
         if substitute_results:
             weighted_sum = 0
             total_weight = 0
             
             for substitute_letter, score in substitute_results:
-                # Get tile frequency weight for this letter
+                # Use original tile frequency from full bag (exchange = fresh draw)
                 weight = self.tile_frequencies.get(substitute_letter, 1)  # Default weight of 1 for missing letters
                 weighted_sum += score * weight
                 total_weight += weight
@@ -1050,25 +1041,16 @@ class WordatroCheater:
                     # Build compact description
                     base_desc = f"  {i}. {letter} - {removal_info}, {exchange_info} ({verdict})"
                     
-                    # Add detailed duplicate removal recommendations
-                    if analysis['excess_letters'] > 0:
-                        removal_recommendations = self._get_removal_recommendations(analysis)
+                    # Add main description
+                    suggestion_lines.append(base_desc)
+                    
+                    # Add detailed duplicate removal recommendations as sub-items
+                    if analysis['available_count'] > 1:
+                        removal_recommendations = self._get_removal_recommendations_list(analysis)
                         if removal_recommendations:
-                            description = base_desc + f" | {removal_recommendations}"
-                        else:
-                            excess_info = f" | {analysis['excess_letters']} excess"
-                            description = base_desc + excess_info
-                    elif analysis['available_count'] > 1:
-                        # Show removal impacts even for non-excess duplicates
-                        removal_recommendations = self._get_removal_recommendations(analysis)
-                        if removal_recommendations:
-                            description = base_desc + f" | {removal_recommendations}"
-                        else:
-                            description = base_desc
-                    else:
-                        description = base_desc
-                        
-                suggestion_lines.append(description)
+                            # Add each removal option as a sub-item
+                            for rec in removal_recommendations:
+                                suggestion_lines.append(f"     {rec}")  # Indented sub-item
             
             suggestion_text = "\n".join(suggestion_lines)
             suggestions.append((suggestion_text, 0, []))  # No score or new letters since this is just analysis
@@ -1088,34 +1070,67 @@ class WordatroCheater:
             destruction_pct = impact['destruction_percentage']
             net_change = impact.get('net_score_change', 0)
             
-            # Categorize safety level and trade verdict based on net score change
-            if net_change > 100:
-                safety = "GAIN"
+            # Calculate percentage gain/loss for consistency with single letter analysis
+            exchange_potential = impact.get('exchange_potential', {})
+            exchange_gain_pct = exchange_potential.get('exchange_percentage_gain', 0)
+            
+            # Net percentage effect (exchange gain - destruction loss)
+            net_percentage = exchange_gain_pct - destruction_pct
+            
+            # Categorize safety level based on net percentage effect
+            if net_percentage > 10:
                 trade_verdict = "GOOD TRADE"
-            elif net_change > 0:
-                safety = "BENEFIT"
+            elif net_percentage > 0:
                 trade_verdict = "GOOD TRADE"
-            elif destruction_pct == 0:
-                safety = "SAFE"
+            elif net_percentage == 0:
                 trade_verdict = "NEUTRAL"
-            elif destruction_pct < 5:
-                safety = "OK"
+            elif net_percentage > -10:
                 trade_verdict = "MINOR LOSS"
-            elif destruction_pct < 15:
-                safety = "CAUTION"
-                trade_verdict = "BAD TRADE"
             else:
-                safety = "RISKY"
                 trade_verdict = "BAD TRADE"
             
-            if net_change != 0:
-                recommendations.append(f"rm{remove_count}:{destruction_pct:.1f}%({safety}:{net_change:+.0f} {trade_verdict})")
-            else:
-                recommendations.append(f"rm{remove_count}:{destruction_pct:.1f}%({safety} {trade_verdict})")
+            # Format consistently with single letter analysis (more compact)
+            recommendations.append(f"rm{remove_count}:{destruction_pct:.1f}%/{exchange_gain_pct:+.1f}% ({trade_verdict})")
         
         if recommendations:
             return "Remove: " + ", ".join(recommendations)
         return ""
+    
+    def _get_removal_recommendations_list(self, analysis: Dict) -> List[str]:
+        """Generate list of removal recommendations as separate strings for sub-item formatting."""
+        # Show removal impacts for any letter that appears multiple times
+        if not analysis['removal_impacts'] or analysis['available_count'] <= 1:
+            return []
+        
+        recommendations = []
+        
+        for remove_count in sorted(analysis['removal_impacts'].keys()):
+            impact = analysis['removal_impacts'][remove_count]
+            destruction_pct = impact['destruction_percentage']
+            
+            # Calculate percentage gain/loss for consistency with single letter analysis
+            exchange_potential = impact.get('exchange_potential', {})
+            exchange_gain_pct = exchange_potential.get('exchange_percentage_gain', 0)
+            
+            # Net percentage effect (exchange gain - destruction loss)
+            net_percentage = exchange_gain_pct - destruction_pct
+            
+            # Categorize safety level based on net percentage effect
+            if net_percentage > 10:
+                trade_verdict = "GOOD TRADE"
+            elif net_percentage > 0:
+                trade_verdict = "GOOD TRADE"
+            elif net_percentage == 0:
+                trade_verdict = "NEUTRAL"
+            elif net_percentage > -10:
+                trade_verdict = "MINOR LOSS"
+            else:
+                trade_verdict = "BAD TRADE"
+            
+            # Format as individual recommendations
+            recommendations.append(f"Remove {remove_count}: {destruction_pct:.1f}%/{exchange_gain_pct:+.1f}% ({trade_verdict})")
+        
+        return recommendations
     
     def _prime_substitution_cache(self, target_fullness=0.10):
         """Prime the substitution cache with realistic letter combinations based on tile frequencies.
@@ -1165,13 +1180,13 @@ class WordatroCheater:
                 new_entries = current_cache_size - initial_cache_size
                 print(f'\r  [{bar}] {progress:.0%} ({i + 1}/{total_combinations}) | Cache: +{new_entries} entries', end='', flush=True)
                 
-                # Shuffle the tile pool and draw 7-10 letters
-                shuffled_pool = tile_pool.copy()
-                random.shuffle(shuffled_pool)
+                # Shuffle the tile pool and draw 7-10 letters (without replacement)
+                available_tiles = tile_pool.copy()
+                random.shuffle(available_tiles)
                 
-                # Draw a random number of letters (7-10)
+                # Draw a random number of letters (7-10) - each tile can only be drawn once
                 draw_count = random.randint(7, 10)
-                drawn_letters = shuffled_pool[:draw_count]
+                drawn_letters = available_tiles[:draw_count]  # Takes first N tiles (no replacement)
                 
                 # Convert to string and add random exchange count (1-3)
                 letter_string = ''.join(drawn_letters)
@@ -1438,8 +1453,50 @@ class WordatroCheater:
         if results.get('exchange_suggestions'):
             print(f"\n{'='*15} LETTER ANALYSIS {'='*15}")
             for i, (suggestion, improvement, new_letters) in enumerate(results['exchange_suggestions'], 1):
-                print(f"{suggestion}")
+                # Format for 80-column terminals - wrap long lines
+                formatted_suggestion = self._format_for_terminal_width(suggestion, 80)
+                print(formatted_suggestion)
                 print()
+    
+    def _format_for_terminal_width(self, text: str, width: int) -> str:
+        """Format text to fit within specified terminal width."""
+        lines = text.split('\n')
+        formatted_lines = []
+        
+        for line in lines:
+            if len(line) <= width:
+                formatted_lines.append(line)
+            else:
+                # Try to break at commas first, then spaces
+                if ',' in line:
+                    parts = line.split(', ')
+                    current_line = parts[0]
+                    
+                    for part in parts[1:]:
+                        if len(current_line + ', ' + part) <= width:
+                            current_line += ', ' + part
+                        else:
+                            formatted_lines.append(current_line + ',')
+                            current_line = '  ' + part  # Indent continuation
+                    
+                    if current_line:
+                        formatted_lines.append(current_line)
+                else:
+                    # Break at spaces if no commas
+                    words = line.split(' ')
+                    current_line = words[0]
+                    
+                    for word in words[1:]:
+                        if len(current_line + ' ' + word) <= width:
+                            current_line += ' ' + word
+                        else:
+                            formatted_lines.append(current_line)
+                            current_line = '  ' + word  # Indent continuation
+                    
+                    if current_line:
+                        formatted_lines.append(current_line)
+        
+        return '\n'.join(formatted_lines)
 
 def main():
     """Main function to run the WordatroCheater utility."""
