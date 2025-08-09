@@ -443,62 +443,121 @@ class WordatroCheater:
 
     
     def find_exchange_opportunities(self, letters: List[str], exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
-        """Find potential letter exchanges by simulating random exchanges."""
+        """Analyze least useful letters based on their usage in found words."""
         if exchanges_remaining <= 0:
             return []
         
         current_letters = letters.copy()
         
-        # Get current best score
+        # Get current words
         current_words = self.generate_word_combinations(current_letters)
-        current_best_score = max([self.calculate_word_score(w) for w in current_words], default=0)
         
+        if not current_words:
+            return []
+        
+        # Analyze letter usage in found words to identify least useful letters
+        letter_usage_analysis = self._analyze_letter_usage_in_words(current_letters, current_words)
+        
+        # Format as least useful letters ranked by usefulness
+        suggestions = self._format_least_useful_letters(letter_usage_analysis, exchanges_remaining)
+        
+        return suggestions
+    
+    def _analyze_letter_usage_in_words(self, input_letters: List[str], found_words: Set[str]) -> Dict:
+        """Analyze how frequently each input letter appears in the found words."""
+        input_letter_counts = Counter(input_letters)
+        
+        # Count how many words each input letter appears in
+        letter_word_appearances = defaultdict(int)  # How many words contain each letter
+        letter_total_usage = defaultdict(int)  # Total times each letter is used across all words
+        letter_contribution_scores = defaultdict(float)  # Average score contribution
+        
+        for word in found_words:
+            word_letters = Counter(word.upper())
+            word_score = self.calculate_word_score(word)
+            
+            for letter in input_letter_counts:
+                if letter == '*':  # Skip wildcards
+                    continue
+                    
+                if letter in word_letters:
+                    # Count word appearances (each word counts once, regardless of letter frequency in that word)
+                    letter_word_appearances[letter] += 1
+                    
+                    # Count total usage across all words
+                    letter_total_usage[letter] += word_letters[letter]
+                    
+                    # Calculate contribution to word score
+                    letter_score = self.letter_scores.get(letter, 10)
+                    contribution = (letter_score * len(word)) / word_score if word_score > 0 else 0
+                    letter_contribution_scores[letter] += contribution
+        
+        # Calculate usage efficiency for each letter
+        letter_efficiency = {}
+        for letter in input_letter_counts:
+            if letter == '*':
+                continue
+                
+            available_count = input_letter_counts[letter]
+            word_appearances = letter_word_appearances[letter]
+            total_usage = letter_total_usage[letter]
+            avg_contribution = letter_contribution_scores[letter] / max(1, word_appearances)
+            
+            # Calculate usage rate: what percentage of your available letters are actually being used
+            # This is total_usage divided by available_count (how many times you could use this letter)
+            max_possible_usage = available_count * len(found_words)  # If every word used every available letter
+            actual_usage_rate = total_usage / max_possible_usage if max_possible_usage > 0 else 0
+            
+            # Efficiency = (word appearances * actual usage rate * avg contribution)
+            efficiency = word_appearances * actual_usage_rate * avg_contribution
+                
+            letter_efficiency[letter] = {
+                'efficiency': efficiency,
+                'total_usage': total_usage,
+                'available_count': available_count,
+                'word_appearances': word_appearances,
+                'avg_contribution': avg_contribution,
+                'usage_rate': actual_usage_rate
+            }
+        
+        return letter_efficiency
+    
+    def _format_least_useful_letters(self, letter_analysis: Dict, exchanges_remaining: int) -> List[Tuple[str, int, List[str]]]:
+        """Format the least useful letters analysis for display."""
+        
+        # Sort letters by usefulness (least useful first - best candidates for swapping)
+        letters_by_usefulness = []
+        for letter, analysis in letter_analysis.items():
+            if letter != '*' and analysis['available_count'] > 0:
+                # Create a usefulness score based on word appearances and usage rate
+                usefulness_score = analysis['word_appearances'] * analysis['usage_rate']
+                letters_by_usefulness.append((letter, usefulness_score, analysis))
+        
+        letters_by_usefulness.sort(key=lambda x: x[1])  # Sort by usefulness (lowest first)
+        
+        if not letters_by_usefulness:
+            return []
+        
+        # Format the results
         suggestions = []
         
-        # Create a realistic letter distribution for random exchanges
-        # Based on common English letter frequency
-        letter_pool = [
-            'E', 'E', 'E', 'E', 'E', 'E',  # Most common
-            'A', 'A', 'A', 'A', 'A',
-            'R', 'R', 'R', 'R', 'I', 'I', 'I', 'I',
-            'O', 'O', 'O', 'O', 'T', 'T', 'T', 'T',
-            'N', 'N', 'N', 'S', 'S', 'S', 'L', 'L', 'L',
-            'C', 'C', 'U', 'U', 'D', 'D', 'P', 'P',
-            'M', 'M', 'H', 'H', 'G', 'G', 'B', 'B',
-            'F', 'F', 'Y', 'Y', 'W', 'W', 'K', 'V',
-            'X', 'Z', 'J', 'Q'  # Rare letters
-        ]
-        
-        # Test multiple random exchange scenarios in parallel
-        exchange_scenarios = []
-        
-        for exchange_count in range(1, min(4, exchanges_remaining + 1)):
-            # Generate multiple random scenarios for this exchange count
-            for _ in range(20):  # Test 20 random scenarios per exchange count
-                scenario = self._generate_random_exchange_scenario(current_letters, letter_pool, exchange_count)
-                if scenario:
-                    exchange_scenarios.append(scenario)
-        
-        # Test scenarios in parallel
-        promising_exchanges = []
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count())) as executor:
-            future_to_scenario = {
-                executor.submit(self._test_exchange_scenario, scenario, current_best_score): scenario 
-                for scenario in exchange_scenarios
-            }
+        # Create a single suggestion showing least useful letters ranked
+        if letters_by_usefulness:
+            suggestion_lines = ["Least useful letters to consider exchanging (ranked worst to best):"]
             
-            for future in concurrent.futures.as_completed(future_to_scenario):
-                try:
-                    result = future.result()
-                    if result:
-                        promising_exchanges.append(result)
-                except Exception as e:
-                    continue  # Skip failed scenarios
+            for i, (letter, usefulness, analysis) in enumerate(letters_by_usefulness, 1):
+                if analysis['word_appearances'] == 0:
+                    description = f"  {i}. {letter} - unused in any words"
+                elif analysis['word_appearances'] == 1:
+                    description = f"  {i}. {letter} - appears in 1 word ({analysis['usage_rate']:.0%} of available used)"
+                else:
+                    description = f"  {i}. {letter} - appears in {analysis['word_appearances']} words ({analysis['usage_rate']:.0%} of available used)"
+                suggestion_lines.append(description)
+            
+            suggestion_text = "\n".join(suggestion_lines)
+            suggestions.append((suggestion_text, 0, []))  # No score or new letters since this is just analysis
         
-        # Sort by improvement and return top suggestions
-        promising_exchanges.sort(key=lambda x: x[1], reverse=True)
-        return promising_exchanges[:3]
+        return suggestions
     
     def _generate_random_exchange_scenario(self, current_letters: List[str], letter_pool: List[str], exchange_count: int) -> Tuple[str, List[str], List[str]] or None:
         """Generate a random exchange scenario."""
@@ -572,12 +631,15 @@ class WordatroCheater:
         scored_words.sort(key=lambda x: x[1], reverse=True)
         top_10 = scored_words[:10]
         
+        # Get exchange suggestions
+        exchange_suggestions = self.find_exchange_opportunities(letters, exchanges_remaining)
         
         return {
             'input': input_str,
             'parsed_letters': letters,
             'exchanges_remaining': exchanges_remaining,
             'top_words': top_10,
+            'exchange_suggestions': exchange_suggestions,
             'total_words_found': len(valid_words)
         }
     
@@ -598,6 +660,12 @@ class WordatroCheater:
                 print(f"{i:2d}. {word:<12} | Score: {score:4d} | ({letter_score} × {len(word)})")
         else:
             print("No valid words found.")
+        
+        if results.get('exchange_suggestions'):
+            print(f"\n{'='*25} LETTER ANALYSIS {'='*25}")
+            for i, (suggestion, improvement, new_letters) in enumerate(results['exchange_suggestions'], 1):
+                print(f"{suggestion}")
+                print()
 
 def main():
     """Main function to run the WordatroCheater utility."""
