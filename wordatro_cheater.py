@@ -82,9 +82,10 @@ class WordatroCheater:
 
     def save_cache(self):
         """Save both game modes' caches."""
-        print("Saving caches...")
+        print("Saving cache...")
+        # Only need to save from one game instance since they share the same DictionaryManager
         self.wordatro.save_cache()
-        self.wordle.save_cache()
+        # Don't call self.wordle.save_cache() as it would duplicate the save
 
     def show_cache_stats(self):
         """Show cache statistics for both game modes."""
