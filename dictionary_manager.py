@@ -39,7 +39,7 @@ class ProgressBar:
         elapsed = time.time() - self.start_time
         
         # Estimate remaining time
-        if self.current > 0:
+        if self.current > 0 and elapsed > 0:
             rate = self.current / elapsed
             remaining = (self.total - self.current) / rate if rate > 0 else 0
             eta_str = f"ETA: {remaining:.1f}s"
@@ -371,9 +371,15 @@ class DictionaryManager:
 
     def save_cache(self):
         self._save_cached_data()
+        # Set timestamp to prevent duplicate saves from atexit handler
+        self._last_save_time = time.time()
 
     def _save_cache_on_exit(self):
+        # Check if cache was already saved recently (within last second)
         if hasattr(self, 'dictionary') and self.dictionary:
-            self._save_cached_data()
+            current_time = time.time()
+            if not hasattr(self, '_last_save_time') or (current_time - self._last_save_time) > 1:
+                self._save_cached_data()
+                self._last_save_time = current_time
 
 

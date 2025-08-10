@@ -91,25 +91,36 @@ class WordleGame(BaseWordGame):
             if color in ['G', 'Y']:
                 current_guess_required[letter] += 1
         
-        # Second pass: handle black letters that might be duplicates
+        # Second pass: handle black letters - they should only be excluded from specific positions
         for i, (letter, color) in enumerate(zip(word, feedback)):
             if color == 'B':
-                # If this letter appears as G or Y elsewhere in this word, don't exclude it entirely
-                if letter not in current_guess_required:
-                    self.accumulated_excluded.add(letter)
-                else:
-                    # This letter appears both as B and G/Y in the same word
-                    # Track that this specific position excludes this letter
-                    if letter not in self.accumulated_position_exclusions:
-                        self.accumulated_position_exclusions[letter] = set()
-                    self.accumulated_position_exclusions[letter].add(i)
+                # In Wordle, a black letter only means "not at this position"
+                # It doesn't mean the letter is excluded entirely
+                # BUT: if this letter is green at this position, don't exclude it
+                if letter not in self.accumulated_position_exclusions:
+                    self.accumulated_position_exclusions[letter] = set()
+                self.accumulated_position_exclusions[letter].add(i)
         
         # For each letter, calculate the actual required count
         for letter, count in current_guess_required.items():
             # The required count is the number of green/yellow positions
-            # A black position doesn't mean "exclude this letter entirely" - 
-            # it just means "this letter is not at this specific position"
             self.accumulated_required[letter] = max(self.accumulated_required[letter], count)
+        
+        # Remove any letters from accumulated_excluded that are now required
+        # This handles cases where a letter was excluded in a previous guess but is now required
+        for letter in list(self.accumulated_excluded):
+            if letter in self.accumulated_required:
+                self.accumulated_excluded.remove(letter)
+        
+        # Clean up position exclusions for letters that are now required at those positions
+        for letter, positions in list(self.accumulated_position_exclusions.items()):
+            for pos in list(positions):
+                if pos in self.accumulated_positional and self.accumulated_positional[pos] == letter:
+                    # This letter is required at this position, so remove the exclusion
+                    positions.remove(pos)
+            # Remove empty position sets
+            if not positions:
+                del self.accumulated_position_exclusions[letter]
 
     def find_words_with_exclusions(
         self,
@@ -157,14 +168,14 @@ class WordleGame(BaseWordGame):
 
         return valid
 
-    def find_best_words(self, input_str: str, sort_by: str = 'commonality'):
+    def find_best_words(self, input_str: str, sort_by: str = 'information_gain'):
         letters, exchanges_remaining, required_letters, target_length, positional_letters, excluded_letters, game_mode = self.parse_wordle_input(input_str)
         valid_words = self.find_words_with_exclusions(letters, target_length, required_letters, positional_letters, excluded_letters)
         
         if not valid_words:
             return {
                 'input': input_str,
-                'parsed_letters': letters,
+                'parsed_letters': required_letters,
                 'required_letters': required_letters,
                 'target_length': target_length,
                 'positional_letters': positional_letters,
@@ -177,6 +188,7 @@ class WordleGame(BaseWordGame):
                 'accumulated_info': self._get_accumulated_info_display(),
             }
         
+        # Sort words using the enhanced criteria
         sorted_words = self.sort_words_by_criteria(valid_words, sort_by, 'wordle')
         top_words = sorted_words[:10]
         

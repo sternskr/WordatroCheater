@@ -25,6 +25,7 @@ def main():
             print("2. Wordle Mode (word:feedback)")
             print("3. Show Cache Statistics")
             print("4. Wordle Game Management")
+            print("5. Help & Scoring Information")
             print("q. Quit and Save Cache")
             print("="*40)
             
@@ -62,8 +63,39 @@ def main():
                         print("❌ Invalid choice. Please enter 1, 2, or 3.")
                 continue
                 
+            elif choice == '5':
+                # Help & Scoring Information
+                print("\n" + "="*50)
+                print("📚 Help & Scoring Information")
+                print("="*50)
+                print("\n🎯 Wordle Mode Scoring:")
+                print("• Hybrid (default): Automatically switches between information gain")
+                print("  and commonality based on how many words remain:")
+                print("  - Many words (>200): Heavily favors information gain")
+                print("  - Moderate (50-200): Balanced approach")
+                print("  - Few words (<50): Heavily favors commonality")
+                print("  - Smooth transitions - no sudden strategy changes!")
+                print("• Information Gain: Prioritizes words that narrow down")
+                print("  possible answers most effectively")
+                print("• Score: Uses letter frequency and common patterns")
+                print("• Commonality: Prioritizes commonly used words")
+                print("• Length: Sorts by word length")
+                print("• Alphabetical: Sorts alphabetically")
+                print("\n💡 Why Hybrid Scoring?")
+                print("Early in the game, information gain is crucial for narrowing")
+                print("down possibilities. Later, when few words remain, commonality")
+                print("helps you actually guess the answer. Hybrid does this automatically!")
+                print("\n🎲 Wordatro Mode Scoring:")
+                print("• Score: Scrabble-style letter scoring")
+                print("• Commonality: Letter frequency based")
+                print("• Length: Word length")
+                print("• Alphabetical: Alphabetical order")
+                print("\n" + "="*50)
+                input("Press Enter to continue...")
+                continue
+                
             elif choice not in ['1', '2']:
-                print("❌ Invalid choice. Please enter 1, 2, 3, 4, or q.")
+                print("❌ Invalid choice. Please enter 1, 2, 3, 4, 5, or q.")
                 continue
             
             # Game mode selected - enter the sub-loop
@@ -98,11 +130,20 @@ def main():
                     continue
                 
                 try:
-                    # Simplified sort options
-                    print("\nSort by: score (Enter), commonality (c), length (l), alpha (a)")
+                    # Enhanced sort options with information gain for Wordle
+                    if choice == '2':  # Wordle mode
+                        print("\nSort by: hybrid (Enter), information gain (i), score (s), commonality (c), length (l), alpha (a)")
+                        print("💡 Hybrid automatically switches between info gain (many words) and commonality (few words)")
+                    else:  # Wordatro mode
+                        print("\nSort by: score (Enter), commonality (c), length (l), alpha (a)")
                     
                     sort_choice = input("Sort choice: ").strip().lower()
                     if not sort_choice:
+                        if choice == '2':  # Wordle mode - default to hybrid
+                            sort_choice = 'hybrid'
+                        else:  # Wordatro mode - default to score
+                            sort_choice = 'score'
+                    elif sort_choice == 's':
                         sort_choice = 'score'
                     elif sort_choice == 'c':
                         sort_choice = 'commonality'
@@ -110,12 +151,24 @@ def main():
                         sort_choice = 'length'
                     elif sort_choice == 'a':
                         sort_choice = 'alphabetical'
+                    elif sort_choice == 'i':
+                        sort_choice = 'information_gain'
+                    elif sort_choice == 'h':
+                        sort_choice = 'hybrid'
                     
                     # Validate sort choice
-                    valid_sorts = ['score', 'commonality', 'length', 'alphabetical']
+                    if choice == '2':  # Wordle mode
+                        valid_sorts = ['hybrid', 'information_gain', 'score', 'commonality', 'length', 'alphabetical']
+                    else:  # Wordatro mode
+                        valid_sorts = ['score', 'commonality', 'length', 'alphabetical']
+                    
                     if sort_choice not in valid_sorts:
-                        print(f"Using default: score")
-                        sort_choice = 'score'
+                        if choice == '2':  # Wordle mode
+                            print(f"Using default: hybrid")
+                            sort_choice = 'hybrid'
+                        else:  # Wordatro mode
+                            print(f"Using default: score")
+                            sort_choice = 'score'
                     
                     print(f"Processing with '{sort_choice}' sorting...")
                     

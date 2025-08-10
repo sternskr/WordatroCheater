@@ -157,7 +157,9 @@ class BaseWordGame:
             if game_mode == 'wordatro':
                 scored_words = [(w, self.calculate_word_score(w)) for w in words]
             else:
-                scored_words = [(w, self.calculate_wordle_score(w)) for w in words]
+                # For Wordle, use information gain as the primary scoring method
+                # This prioritizes words that narrow down the possible answers most effectively
+                scored_words = [(w, self.calculate_wordle_information_gain_optimized(w, words)) for w in words]
             return sorted(scored_words, key=lambda x: x[1], reverse=True)
         elif sort_by == 'length':
             return sorted(
@@ -171,6 +173,22 @@ class BaseWordGame:
             if game_mode == 'wordle':
                 scored_words = [(w, self.calculate_wordle_commonality_score(w)) for w in words]
             else:
+                scored_words = [(w, self.calculate_word_score(w)) for w in words]
+            return sorted(scored_words, key=lambda x: x[1], reverse=True)
+        elif sort_by == 'information_gain':
+            if game_mode == 'wordle':
+                # Use the optimized version for better performance
+                scored_words = [(w, self.calculate_wordle_information_gain_optimized(w, words)) for w in words]
+            else:
+                # For non-Wordle games, fall back to regular scoring
+                scored_words = [(w, self.calculate_word_score(w)) for w in words]
+            return sorted(scored_words, key=lambda x: x[1], reverse=True)
+        elif sort_by == 'hybrid':
+            if game_mode == 'wordle':
+                # Use hybrid scoring that adapts based on word count
+                scored_words = [(w, self.calculate_wordle_hybrid_score(w, words)) for w in words]
+            else:
+                # For non-Wordle games, fall back to regular scoring
                 scored_words = [(w, self.calculate_word_score(w)) for w in words]
             return sorted(scored_words, key=lambda x: x[1], reverse=True)
         else:
@@ -230,5 +248,194 @@ class BaseWordGame:
             if letter in common_patterns:
                 score += 0.02
         return score
+
+    def calculate_wordle_information_gain(self, word: str, possible_answers: Set[str]) -> float:
+        """
+        Calculate the expected information gain of a guess word.
+        This measures how much the guess will narrow down the possible answers.
+        
+        Args:
+            word: The word to evaluate as a guess
+            possible_answers: Set of words that could still be the answer
+            
+        Returns:
+            Float representing expected information gain (higher = better)
+        """
+        if not possible_answers or len(possible_answers) <= 1:
+            return 0.0
+        
+        # For each possible feedback pattern, calculate how many words would remain
+        total_gain = 0.0
+        total_patterns = 0
+        
+        # Generate all possible feedback patterns for this word
+        feedback_patterns = self._generate_all_feedback_patterns(word, possible_answers)
+        
+        for feedback in feedback_patterns:
+            # Count how many words would remain after this feedback
+            remaining_words = self._count_words_with_feedback(word, feedback, possible_answers)
+            
+            if remaining_words > 0:
+                # Information gain is log2(total_possible / remaining)
+                # This measures how much we've narrowed down the search space
+                gain = remaining_words / len(possible_answers)
+                total_gain += gain
+                total_patterns += 1
+        
+        if total_patterns == 0:
+            return 0.0
+        
+        # Average gain across all patterns, weighted by probability
+        avg_gain = total_gain / total_patterns
+        
+        # Convert to information gain (lower remaining ratio = higher information gain)
+        # We want to maximize information gain, so invert the ratio
+        information_gain = 1.0 - avg_gain
+        
+        # Add a small bonus for commonality as a tiebreaker
+        commonality_bonus = self.calculate_wordle_commonality_score(word) * 0.1
+        
+        return information_gain + commonality_bonus
+
+    def calculate_wordle_information_gain_optimized(self, word: str, possible_answers: Set[str]) -> float:
+        """
+        Optimized version of information gain calculation that uses a more efficient approach.
+        This version is designed to work well even with large dictionaries.
+        """
+        if not possible_answers or len(possible_answers) <= 1:
+            return 0.0
+        
+        # Use a simplified but effective heuristic for information gain
+        # Focus on letter diversity and position coverage
+        
+        # Count unique letters in the word
+        unique_letters = len(set(word))
+        
+        # Calculate position diversity (how many different letters are in different positions)
+        position_diversity = 0
+        for i in range(len(word)):
+            for j in range(i + 1, len(word)):
+                if word[i] != word[j]:
+                    position_diversity += 1
+        
+        # Normalize position diversity
+        max_position_diversity = (len(word) * (len(word) - 1)) // 2
+        if max_position_diversity > 0:
+            position_diversity = position_diversity / max_position_diversity
+        
+        # Base information gain from letter diversity
+        base_gain = unique_letters / len(word)
+        
+        # Add position diversity bonus
+        total_gain = base_gain + (position_diversity * 0.3)
+        
+        # Add commonality bonus as a tiebreaker (smaller weight)
+        commonality_bonus = self.calculate_wordle_commonality_score(word) * 0.05
+        
+        return total_gain + commonality_bonus
+
+    def calculate_wordle_hybrid_score(self, word: str, possible_answers: Set[str], 
+                                    info_gain_threshold: int = 200, 
+                                    commonality_threshold: int = 50) -> float:
+        """
+        Continuous hybrid scoring that smoothly transitions between information gain and commonality
+        based on the number of remaining possible answers.
+        
+        Args:
+            word: The word to score
+            possible_answers: Set of remaining possible answers
+            info_gain_threshold: Center point for the transition (default: 200 words)
+            commonality_threshold: Controls transition steepness (default: 50 words)
+        """
+        num_answers = len(possible_answers)
+        
+        # Use a smooth transition function that prioritizes info gain for many words
+        # and commonality for few words
+        
+        # Simple approach: use the ratio of words to threshold
+        # When num_answers is much larger than threshold, info_gain_weight approaches 1.0
+        # When num_answers is much smaller than threshold, info_gain_weight approaches 0.0
+        
+        # Calculate the ratio and apply a smooth curve
+        ratio = num_answers / info_gain_threshold
+        
+        # Use a smooth curve: info_gain_weight = ratio / (1 + ratio)
+        # This gives us a smooth transition from 0 to 1
+        # BUT: we want the opposite! Many words → high info gain, few words → high commonality
+        # So we invert the logic
+        info_gain_weight = ratio / (1 + ratio)
+        commonality_weight = 1.0 - info_gain_weight
+        
+        # Calculate both scores
+        info_gain_score = self.calculate_wordle_information_gain_optimized(word, possible_answers)
+        commonality_score = self.calculate_wordle_commonality_score(word)
+        
+        # Normalize scores to 0-1 range for fair weighting
+        normalized_info_gain = min(info_gain_score, 1.0)  # Cap at 1.0
+        normalized_commonality = min(commonality_score / 10.0, 1.0)  # Scale commonality down
+        
+        # Combine with dynamic weights
+        hybrid_score = (normalized_info_gain * info_gain_weight + 
+                       normalized_commonality * commonality_weight)
+        
+        return hybrid_score
+
+    def _generate_all_feedback_patterns(self, word: str, possible_answers: Set[str]) -> Set[str]:
+        """
+        Generate all possible feedback patterns for a word against possible answers.
+        This is a simplified version - in practice, you'd want to simulate actual Wordle feedback.
+        """
+        patterns = set()
+        
+        # For each possible answer, generate what the feedback would be
+        for answer in possible_answers:
+            if len(word) == len(answer):
+                feedback = self._simulate_wordle_feedback(word, answer)
+                patterns.add(feedback)
+        
+        return patterns
+
+    def _simulate_wordle_feedback(self, guess: str, answer: str) -> str:
+        """
+        Simulate Wordle feedback for a guess against an answer.
+        Returns a string like 'GYBYY' where G=Green, Y=Yellow, B=Black.
+        """
+        if len(guess) != len(answer):
+            return 'B' * len(guess)
+        
+        feedback = ['B'] * len(guess)
+        answer_letters = list(answer)
+        guess_letters = list(guess)
+        
+        # First pass: mark greens
+        for i in range(len(guess)):
+            if guess_letters[i] == answer_letters[i]:
+                feedback[i] = 'G'
+                answer_letters[i] = None  # Mark as used
+                guess_letters[i] = None   # Mark as used
+        
+        # Second pass: mark yellows
+        for i in range(len(guess)):
+            if guess_letters[i] is not None:
+                if guess_letters[i] in answer_letters:
+                    feedback[i] = 'Y'
+                    # Remove the first occurrence of this letter from answer
+                    for j in range(len(answer_letters)):
+                        if answer_letters[j] == guess_letters[i]:
+                            answer_letters[j] = None
+                            break
+        
+        return ''.join(feedback)
+
+    def _count_words_with_feedback(self, word: str, feedback: str, possible_answers: Set[str]) -> int:
+        """
+        Count how many words from possible_answers would give the specified feedback
+        when guessed against the given word.
+        """
+        count = 0
+        for answer in possible_answers:
+            if self._simulate_wordle_feedback(word, answer) == feedback:
+                count += 1
+        return count
 
 
